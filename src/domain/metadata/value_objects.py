@@ -10,6 +10,7 @@ from src.domain.metadata.exceptions import InvalidScoreRange
 @dataclass(frozen=True)
 class VectorEmbedding(BaseValueObject):
     """Векторное представление изображения (эмбеддинг)"""
+
     values: Tuple[float, ...]
     model_name: str
 
@@ -17,9 +18,9 @@ class VectorEmbedding(BaseValueObject):
     def dimension(self) -> int:
         return len(self.values)
 
-    def l2_normalize(self) -> 'VectorEmbedding':
+    def l2_normalize(self) -> "VectorEmbedding":
         """Возвращает новый VectorEmbedding с L2-нормализацией"""
-        norm = math.sqrt(sum(v ** 2 for v in self.values))
+        norm = math.sqrt(sum(v**2 for v in self.values))
         if norm == 0:
             return self
         normalized = tuple(v / norm for v in self.values)
@@ -29,6 +30,7 @@ class VectorEmbedding(BaseValueObject):
 @dataclass(frozen=True)
 class ColorEntry(BaseValueObject):
     """Запись цвета в палитре"""
+
     rgb: Tuple[int, int, int]
     hex: str
     percentage: float
@@ -38,13 +40,18 @@ class ColorEntry(BaseValueObject):
             raise ValueError(f"RGB values must be integers in 0..255, got {self.rgb}")
         if not (0.0 <= self.percentage <= 100.0):
             raise ValueError(f"Percentage must be in 0..100, got {self.percentage}")
-        if not isinstance(self.hex, str) or not self.hex.startswith('#') or len(self.hex) not in (4, 7):
+        if (
+            not isinstance(self.hex, str)
+            or not self.hex.startswith("#")
+            or len(self.hex) not in (4, 7)
+        ):
             raise ValueError(f"Invalid hex format: {self.hex}")
 
 
 @dataclass(frozen=True)
 class NsfwScore(BaseValueObject):
     """Оценка NSFW контента"""
+
     nsfw_value: float
     safe_value: float
 
@@ -59,6 +66,7 @@ class NsfwScore(BaseValueObject):
 @dataclass(frozen=True)
 class PoseKeypoint(BaseValueObject):
     """Ключевая точка скелета (Keypoint)"""
+
     x: float
     y: float
     confidence: float

@@ -51,7 +51,9 @@ class VisualDupDetectorPort(ABC):
     def calculate_phash(self, image_path: Path) -> str: ...
 
     @abstractmethod
-    def calculate_vit_similarity(self, image_path1: Path, image_path2: Path) -> float: ...
+    def calculate_vit_similarity(
+        self, image_path1: Path, image_path2: Path
+    ) -> float: ...
 
 
 class AISegmenterPort(ABC):

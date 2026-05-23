@@ -8,6 +8,7 @@ from typing import Any
 @dataclass
 class BaseEntity:
     """Базовый класс для всех сущностей (Entity)."""
+
     id: UUID = field(default_factory=uuid4)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

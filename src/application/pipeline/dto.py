@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Literal
 @dataclass
 class PipelineConfigDTO:
     """Конфигурация для запуска всего пайплайна."""
+
     source_path: Path
     output_path: Path
     steps_to_run: Optional[List[int]] = None
@@ -16,6 +17,7 @@ class PipelineConfigDTO:
 @dataclass
 class StepConfigDTO:
     """Конфигурация для конкретного шага."""
+
     step_number: int
     params: Dict[str, Any] = field(default_factory=dict)
 
@@ -23,6 +25,7 @@ class StepConfigDTO:
 @dataclass
 class StepResultDTO:
     """Результат выполнения шага."""
+
     step_number: int
     status: Literal["COMPLETED", "FAILED", "SKIPPED"]
     message: str = ""

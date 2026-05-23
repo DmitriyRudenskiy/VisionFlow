@@ -22,4 +22,5 @@ class StepStatus(str, Enum):
 @dataclass(frozen=True)
 class StepConfig(BaseValueObject):
     """Конфигурация конкретного шага пайплайна (immutable)"""
+
     params: Dict[str, Any] = field(default_factory=dict)

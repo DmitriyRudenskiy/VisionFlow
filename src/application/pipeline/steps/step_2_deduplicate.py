@@ -39,7 +39,7 @@ class Step2Deduplicate(BaseStep):
                     file_hash=FileHash(algorithm="md5", value=hash_value),
                     file_path=file_vo,
                     file_size=file_size,
-                    modified_at=modified_at
+                    modified_at=modified_at,
                 )
                 hash_map[hash_value].append(entry)
 
@@ -65,5 +65,5 @@ class Step2Deduplicate(BaseStep):
         return StepResultDTO(
             step_number=config.step_number,
             status="COMPLETED",
-            message=f"Found {duplicates_found} duplicates. Skipped {skipped_count} files."
+            message=f"Found {duplicates_found} duplicates. Skipped {skipped_count} files.",
         )

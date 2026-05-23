@@ -1,1 +1,2 @@
 - добавить ProcessPoolExecutor вместо ThreadPoolExecutor для истинного CPU-параллелизма (например, если шаги 5–8 станут тяжёлыми вычислениями на CPU), либо реализовать asyncio версию для I/O-bound AI-клиентов.
+- добавить тегирование девятым шагом при помощи https://huggingface.co/microsoft/Florence-2-large-ft

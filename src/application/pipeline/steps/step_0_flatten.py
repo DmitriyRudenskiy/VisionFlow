@@ -45,5 +45,5 @@ class Step0Flatten(BaseStep):
             status="COMPLETED",
             message=f"Flattened directory. Moved {moved_count} files to root. Skipped {skipped_count}.",
             processed_count=moved_count,
-            skipped_count=skipped_count
+            skipped_count=skipped_count,
         )

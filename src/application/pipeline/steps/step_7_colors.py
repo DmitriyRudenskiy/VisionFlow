@@ -1,25 +1,27 @@
-# application/pipeline/steps/step_8_nsfw.py
+# src/application/pipeline/steps/step_7_colors.py
 import json
 import logging
 from pathlib import Path
+
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
-from src.application.ports import FileSystemServicePort, NsfwClassifierPort
-from src.domain.image.value_objects import FilePath
-from src.domain.metadata.value_objects import NsfwScore
+from src.application.ports import FileSystemServicePort, ColorExtractorPort
+from src.domain.metadata.value_objects import ColorEntry
 
 logger = logging.getLogger(__name__)
 
 
-class Step8NsfwScore(BaseStep):
-    def __init__(self, fs_service: FileSystemServicePort, nsfw_classifier: NsfwClassifierPort):
+class Step7Colors(BaseStep):
+    def __init__(
+        self, fs_service: FileSystemServicePort, color_extractor: ColorExtractorPort
+    ):
         self._fs = fs_service
-        self._nsfw_classifier = nsfw_classifier
+        self._color_extractor = color_extractor
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
         source_path = Path(config.params.get("source_path", "."))
-        nsfw_path = source_path / "_nsfw"
-        self._fs.create_directory(nsfw_path)
+        colors_path = source_path / "_colors"
+        self._fs.create_directory(colors_path)
 
         all_files = self._fs.scan_directory(source_path, recursive=False)
         processed_count = 0
@@ -28,29 +30,45 @@ class Step8NsfwScore(BaseStep):
             if not file_path.is_file():
                 continue
 
-            out_json = nsfw_path / f"{file_path.stem}_nsfw.json"
+            out_json = colors_path / f"{file_path.stem}_colors.json"
             if out_json.exists():
                 processed_count += 1
                 continue
 
             try:
-                nsfw_val, safe_val = self._nsfw_classifier.classify(file_path)
-                score = NsfwScore(nsfw_value=nsfw_val, safe_value=safe_val)
+                palette_raw = self._color_extractor.extract_palette(file_path)
+                # Преобразование в доменные объекты (опционально, здесь для целостности)
+                color_entries = [
+                    ColorEntry(
+                        rgb=tuple(c["rgb"]), hex=c["hex"], percentage=c["percentage"]
+                    )
+                    for c in palette_raw
+                ]
 
-                with open(out_json, "w") as f:
-                    json.dump({
-                        "file": file_path.name,
-                        "nsfw": score.nsfw_value,
-                        "safe": score.safe_value
-                    }, f)
+                with open(out_json, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "file": file_path.name,
+                            "colors": [
+                                {
+                                    "rgb": list(c.rgb),
+                                    "hex": c.hex,
+                                    "percentage": c.percentage,
+                                }
+                                for c in color_entries
+                            ],
+                        },
+                        f,
+                        ensure_ascii=False,
+                    )
 
                 processed_count += 1
             except Exception as e:
-                logger.warning(f"Failed to classify NSFW {file_path.name}: {e}")
+                logger.warning(f"Failed to extract colors for {file_path.name}: {e}")
 
         return StepResultDTO(
             step_number=config.step_number,
             status="COMPLETED",
-            message=f"Classified NSFW scores for {processed_count} images.",
-            processed_count=processed_count
+            message=f"Extracted color palettes for {processed_count} images.",
+            processed_count=processed_count,
         )

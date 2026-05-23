@@ -2,8 +2,10 @@ from typing import Dict, List
 from src.application.pipeline.steps.base_step import BaseStep
 from src.domain.pipeline.exceptions import StepNotFoundError
 
+
 class StepRegistry:
     """Реестр шагов пайплайна"""
+
     def __init__(self):
         self._steps: Dict[int, BaseStep] = {}
 

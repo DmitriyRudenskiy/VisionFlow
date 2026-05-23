@@ -61,5 +61,5 @@ class Step1Prepare(BaseStep):
             status="COMPLETED",
             message=f"Prepared {processed_count} images. Backups created. Skipped {skipped_count}.",
             processed_count=processed_count,
-            skipped_count=skipped_count
+            skipped_count=skipped_count,
         )

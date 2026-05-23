@@ -60,8 +60,8 @@ class PoseData:
     @property
     def total_keypoints(self) -> int:
         return (
-            len(self.keypoints_body) +
-            len(self.keypoints_face) +
-            len(self.keypoints_left_hand) +
-            len(self.keypoints_right_hand)
+            len(self.keypoints_body)
+            + len(self.keypoints_face)
+            + len(self.keypoints_left_hand)
+            + len(self.keypoints_right_hand)
         )

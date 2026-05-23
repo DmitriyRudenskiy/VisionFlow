@@ -60,9 +60,7 @@ class DuplicateGroup:
         if not self.entries:
             return
         sorted_entries = sorted(
-            self.entries,
-            key=lambda e: (e.file_size, e.modified_at),
-            reverse=True
+            self.entries, key=lambda e: (e.file_size, e.modified_at), reverse=True
         )
         original = sorted_entries[0]
         original.is_original = True

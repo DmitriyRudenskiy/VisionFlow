@@ -12,6 +12,7 @@ from src.domain.pipeline.exceptions import InvalidStepStateTransition, StepNotFo
 @dataclass
 class PipelineStep:
     """Сущность шага пайплайна"""
+
     step_number: int
     step_name: str
     id: UUID = field(default_factory=uuid4)
@@ -68,6 +69,7 @@ class PipelineStep:
 @dataclass
 class PipelineAggregate:
     """Агрегат корня пайплайна"""
+
     name: str
     id: UUID = field(default_factory=uuid4)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -115,7 +117,9 @@ class PipelineAggregate:
         if self.status == PipelineStatus.COMPLETED:
             raise InvalidStepStateTransition("Pipeline is already completed")
         if self.status not in {PipelineStatus.PENDING, PipelineStatus.RUNNING}:
-            raise InvalidStepStateTransition(f"Cannot start step in {self.status.value} state")
+            raise InvalidStepStateTransition(
+                f"Cannot start step in {self.status.value} state"
+            )
         if self.status == PipelineStatus.PENDING:
             self.status = PipelineStatus.RUNNING
         step = self._get_step(step_number)

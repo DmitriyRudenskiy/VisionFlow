@@ -9,7 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 class Step4AICrop(BaseStep):
-    def __init__(self, fs_service: FileSystemServicePort, ai_segmenter: AISegmenterPort):
+    def __init__(
+        self, fs_service: FileSystemServicePort, ai_segmenter: AISegmenterPort
+    ):
         self._fs = fs_service
         self._segmenter = ai_segmenter
 
@@ -49,7 +51,9 @@ class Step4AICrop(BaseStep):
 
                     cropped_count += 1
                 else:
-                    logger.warning(f"Segmenter returned non-existent path for {file_path.name}")
+                    logger.warning(
+                        f"Segmenter returned non-existent path for {file_path.name}"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to crop {file_path.name}: {e}")
 
@@ -57,5 +61,5 @@ class Step4AICrop(BaseStep):
             step_number=config.step_number,
             status="COMPLETED",
             message=f"Successfully cropped {cropped_count} images in '{mode}' mode.",
-            processed_count=cropped_count
+            processed_count=cropped_count,
         )

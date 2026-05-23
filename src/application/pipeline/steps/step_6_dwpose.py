@@ -15,13 +15,17 @@ logger = logging.getLogger(__name__)
 
 
 class Step6DWPose(BaseStep):
-    def __init__(self, fs_service: FileSystemServicePort, pose_extractor: PoseExtractorPort):
+    def __init__(
+        self, fs_service: FileSystemServicePort, pose_extractor: PoseExtractorPort
+    ):
         self._fs = fs_service
         self._pose_extractor = pose_extractor
 
     def _map_keypoints(self, kp_list: list) -> List[PoseKeypoint]:
         return [
-            PoseKeypoint(x=kp['x'], y=kp['y'], confidence=kp['confidence'], name=kp['name'])
+            PoseKeypoint(
+                x=kp["x"], y=kp["y"], confidence=kp["confidence"], name=kp["name"]
+            )
             for kp in kp_list
         ]
 
@@ -49,16 +53,23 @@ class Step6DWPose(BaseStep):
                     file_path=FilePath(path=file_path),
                     keypoints_body=self._map_keypoints(raw_kp.get("body", [])),
                     keypoints_face=self._map_keypoints(raw_kp.get("face", [])),
-                    keypoints_left_hand=self._map_keypoints(raw_kp.get("left_hand", [])),
-                    keypoints_right_hand=self._map_keypoints(raw_kp.get("right_hand", []))
+                    keypoints_left_hand=self._map_keypoints(
+                        raw_kp.get("left_hand", [])
+                    ),
+                    keypoints_right_hand=self._map_keypoints(
+                        raw_kp.get("right_hand", [])
+                    ),
                 )
 
                 with open(out_json, "w") as f:
-                    json.dump({
-                        "file": file_path.name,
-                        "total_keypoints": pose_data.total_keypoints,
-                        "body": raw_kp.get("body", [])
-                    }, f)
+                    json.dump(
+                        {
+                            "file": file_path.name,
+                            "total_keypoints": pose_data.total_keypoints,
+                            "body": raw_kp.get("body", []),
+                        },
+                        f,
+                    )
 
                 processed_count += 1
             except Exception as e:
@@ -68,5 +79,5 @@ class Step6DWPose(BaseStep):
             step_number=config.step_number,
             status="COMPLETED",
             message=f"Extracted poses for {processed_count} images.",
-            processed_count=processed_count
+            processed_count=processed_count,
         )

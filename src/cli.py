@@ -33,8 +33,9 @@ def setup_logging(verbose: bool = False):
         level=level,
         format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)]
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
+
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +74,11 @@ Examples:
   python -m src.cli ./input_images ./output_dir
   python -m src.cli '/Users/user/Downloads/Новая папка' '/Users/user/Downloads/Новая папка' --steps 0
   python -m src.cli ./input_images ./output_dir --pipeline-id 123e4567-e89b-12d3-a456-426614174000
-        """
+        """,
     )
-    parser.add_argument("source", type=Path, help="Путь к директории с исходными изображениями")
+    parser.add_argument(
+        "source", type=Path, help="Путь к директории с исходными изображениями"
+    )
     parser.add_argument("output", type=Path, help="Путь к выходной директории")
     parser.add_argument("--steps", nargs="+", type=int, help="Список номеров шагов")
     parser.add_argument("--pipeline-id", type=UUID, help="UUID существующего пайплайна")
@@ -99,14 +102,16 @@ Examples:
     if args.steps:
         invalid_steps = set(args.steps) - set(available_steps)
         if invalid_steps:
-            logger.error(f"Неизвестные шаги: {invalid_steps}. Доступные: {available_steps}")
+            logger.error(
+                f"Неизвестные шаги: {invalid_steps}. Доступные: {available_steps}"
+            )
             sys.exit(1)
 
     config = PipelineConfigDTO(
         source_path=args.source.resolve(),
         output_path=args.output.resolve(),
         steps_to_run=args.steps,
-        stop_on_error=not args.no_stop_on_error
+        stop_on_error=not args.no_stop_on_error,
     )
 
     logger.info("Запуск VisionFlow Pipeline...")
@@ -144,7 +149,9 @@ Examples:
             else:
                 logger.info(msg)
         logger.info("-" * 50)
-        logger.info(f"Total: {success_count} succeeded, {skip_count} skipped, {fail_count} failed.")
+        logger.info(
+            f"Total: {success_count} succeeded, {skip_count} skipped, {fail_count} failed."
+        )
         logger.info("=" * 50)
     except ValueError as e:
         logger.error(f"Configuration Error: {e}")
@@ -152,7 +159,7 @@ Examples:
     except KeyboardInterrupt:
         logger.warning("\nExecution interrupted by user.")
         sys.exit(130)
-    except Exception as e:
+    except Exception:
         logger.exception("Critical unhandled error during pipeline execution.")
         sys.exit(1)
 

@@ -7,6 +7,7 @@ from src.domain.deduplication.exceptions import InvalidSimilarityScore
 @dataclass(frozen=True)
 class FileHash(BaseValueObject):
     """Value Object для хеша файла (MD5, SHA256 и т.д.)"""
+
     algorithm: str
     value: str
 
@@ -17,6 +18,7 @@ class FileHash(BaseValueObject):
 @dataclass(frozen=True)
 class SimilarityScore(BaseValueObject):
     """Value Object для оценки сходства (0.0 - 1.0)"""
+
     value: float
 
     def __post_init__(self):

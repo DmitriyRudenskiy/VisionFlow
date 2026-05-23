@@ -5,14 +5,15 @@ from pathlib import Path
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
 from src.application.ports import FileSystemServicePort, NsfwClassifierPort
-from src.domain.image.value_objects import FilePath
 from src.domain.metadata.value_objects import NsfwScore
 
 logger = logging.getLogger(__name__)
 
 
 class Step8NsfwScore(BaseStep):
-    def __init__(self, fs_service: FileSystemServicePort, nsfw_classifier: NsfwClassifierPort):
+    def __init__(
+        self, fs_service: FileSystemServicePort, nsfw_classifier: NsfwClassifierPort
+    ):
         self._fs = fs_service
         self._nsfw_classifier = nsfw_classifier
 
@@ -37,11 +38,14 @@ class Step8NsfwScore(BaseStep):
                 score = NsfwScore(nsfw_value=nsfw_val, safe_value=safe_val)
 
                 with open(out_json, "w") as f:
-                    json.dump({
-                        "file": file_path.name,
-                        "nsfw": score.nsfw_value,
-                        "safe": score.safe_value
-                    }, f)
+                    json.dump(
+                        {
+                            "file": file_path.name,
+                            "nsfw": score.nsfw_value,
+                            "safe": score.safe_value,
+                        },
+                        f,
+                    )
 
                 processed_count += 1
             except Exception as e:
@@ -50,5 +54,5 @@ class Step8NsfwScore(BaseStep):
         return StepResultDTO(
             step_number=config.step_number,
             status="COMPLETED",
-            message=f"Classified NSFW scores for {processed_count} images."
+            message=f"Classified NSFW scores for {processed_count} images.",
         )

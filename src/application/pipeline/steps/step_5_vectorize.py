@@ -11,7 +11,9 @@ logger = logging.getLogger(__name__)
 
 
 class Step5Vectorize(BaseStep):
-    def __init__(self, fs_service: FileSystemServicePort, vectorizer: VectorizationPort):
+    def __init__(
+        self, fs_service: FileSystemServicePort, vectorizer: VectorizationPort
+    ):
         self._fs = fs_service
         self._vectorizer = vectorizer
 
@@ -37,16 +39,22 @@ class Step5Vectorize(BaseStep):
                     skipped_count += 1
                     continue
 
-                embedding = VectorEmbedding(values=tuple(raw_vector), model_name="Qwen-VL")
+                embedding = VectorEmbedding(
+                    values=tuple(raw_vector), model_name="Qwen-VL"
+                )
                 normalized = embedding.l2_normalize()
 
                 with open(out_json, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "file": file_path.name,
-                        "model": normalized.model_name,
-                        "vector": list(normalized.values),
-                        "dimension": normalized.dimension
-                    }, f, ensure_ascii=False)
+                    json.dump(
+                        {
+                            "file": file_path.name,
+                            "model": normalized.model_name,
+                            "vector": list(normalized.values),
+                            "dimension": normalized.dimension,
+                        },
+                        f,
+                        ensure_ascii=False,
+                    )
 
                 processed_count += 1
             except Exception as e:
@@ -58,5 +66,5 @@ class Step5Vectorize(BaseStep):
             status="COMPLETED",
             message=f"Vectorized {processed_count} images. Skipped {skipped_count}.",
             processed_count=processed_count,
-            skipped_count=skipped_count
+            skipped_count=skipped_count,
         )

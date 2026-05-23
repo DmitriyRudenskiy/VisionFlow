@@ -1,12 +1,11 @@
 # tests/test_pipeline_steps.py
 import json
-import shutil
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
+from src.application.pipeline.dto import StepConfigDTO
 from src.application.pipeline.steps.step_0_flatten import Step0Flatten
 from src.application.pipeline.steps.step_1_prepare import Step1Prepare
 from src.application.pipeline.steps.step_2_deduplicate import Step2Deduplicate
@@ -17,11 +16,10 @@ from src.application.pipeline.steps.step_6_dwpose import Step6DWPose
 from src.application.pipeline.steps.step_7_colors import Step7Colors
 from src.application.pipeline.steps.step_8_nsfw import Step8NsfwScore
 from src.infrastructure.file_system import FileSystemService
-from src.domain.image.exceptions import InvalidImageFormat
 
 
 @pytest.fixture
-def fs():
+def fs() -> FileSystemService:
     return FileSystemService()
 
 
@@ -40,7 +38,7 @@ def create_test_file(path: Path, name: str, content: bytes = b"img") -> Path:
 
 
 class TestStep0Flatten:
-    def test_flatten_moves_files_to_root(self, tmp_path):
+    def test_flatten_moves_files_to_root(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         nested = src / "sub"
@@ -65,7 +63,7 @@ class TestStep0Flatten:
 
 
 class TestStep1Prepare:
-    def test_backup_and_rename(self, tmp_path):
+    def test_backup_and_rename(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "photo.jpg")
@@ -80,17 +78,15 @@ class TestStep1Prepare:
         assert (src / "_originals").is_dir()
         assert (src / "_originals" / "photo.jpg").exists()
         assert (src / "_originals" / "image.png").exists()
-        # txt file should be ignored
         assert not (src / "_originals" / "readme.txt").exists()
 
         assert len(list((src / "_originals").iterdir())) == 2
 
         root_files = [f for f in src.iterdir() if f.is_file()]
-        # 2 renamed images + 1 untouched txt
         assert len(root_files) == 3
         assert (src / "readme.txt").exists()
 
-    def test_ignore_non_images(self, tmp_path):
+    def test_ignore_non_images(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "data.bin")
@@ -101,11 +97,11 @@ class TestStep1Prepare:
 
         assert result.status == "COMPLETED"
         assert not (src / "_originals" / "data.bin").exists()
-        assert (src / "data.bin").exists()  # Untouched
+        assert (src / "data.bin").exists()
 
 
 class TestStep2Deduplicate:
-    def test_detect_exact_duplicates(self, tmp_path):
+    def test_detect_exact_duplicates(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         content = b"duplicate content"
@@ -123,20 +119,18 @@ class TestStep2Deduplicate:
         duplicates = list(dup_dir.iterdir())
         assert len(duplicates) == 1
 
-        # Exactly one of the duplicates should remain in root
         remaining_dups = [f for f in src.iterdir() if f.is_file() and f.name in ("orig.jpg", "copy.jpg")]
         assert len(remaining_dups) == 1
         assert (src / "unique.png").exists()
 
 
 class TestStep3VisualDups:
-    def test_visual_duplicates_creates_report(self, tmp_path):
+    def test_visual_duplicates_creates_report(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "a.jpg")
         create_test_file(src, "b.png")
 
-        # Mock detector to return different hashes
         detector = MagicMock()
         detector.calculate_phash.side_effect = ["hash_a", "hash_b"]
 
@@ -149,16 +143,14 @@ class TestStep3VisualDups:
         report = src / "visual_dups_report.html"
         assert report.exists()
         assert "Visual Duplicates Report" in report.read_text()
-        # No duplicates moved as hashes are different
         assert len(list((src / "_visual_duplicates").iterdir())) == 0
 
-    def test_visual_duplicates_moves_files(self, tmp_path):
+    def test_visual_duplicates_moves_files(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "a.jpg", b"1")
-        create_test_file(src, "b.png", b"22")  # larger
+        create_test_file(src, "b.png", b"22")
 
-        # Mock detector to return SAME hash
         detector = MagicMock()
         detector.calculate_phash.return_value = "same_hash"
 
@@ -167,20 +159,17 @@ class TestStep3VisualDups:
         result = step.execute(config)
 
         assert result.status == "COMPLETED"
-        # One file moved to dups
         assert len(list((src / "_visual_duplicates").iterdir())) == 1
-        # Larger file remains
         assert (src / "b.png").exists()
 
 
 class TestStep4AICrop:
-    def test_ai_crop_keeps_files_in_root(self, tmp_path):
+    def test_ai_crop_keeps_files_in_root(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "pic.jpg")
         create_test_file(src, "img.png")
 
-        # Mock segmenter to return the same path (in-place modification simulation)
         segmenter = MagicMock()
         segmenter.crop_image.return_value = src / "pic.jpg"
 
@@ -189,16 +178,15 @@ class TestStep4AICrop:
         result = step.execute(config)
 
         assert result.status == "COMPLETED"
-        assert result.processed_count == 2  # Both files processed
+        assert result.processed_count == 2
         assert (src / "pic.jpg").exists()
         assert (src / "img.png").exists()
 
-    def test_ai_crop_handles_temp_file(self, tmp_path):
+    def test_ai_crop_handles_temp_file(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "pic2.jpg")
 
-        # Create a fake temp crop file
         temp_crop = tmp_path / "temp_crop.jpg"
         temp_crop.write_bytes(b"cropped")
 
@@ -211,13 +199,12 @@ class TestStep4AICrop:
 
         assert result.status == "COMPLETED"
         assert result.processed_count == 1
-        # Temp file should be moved to source
         assert not temp_crop.exists()
         assert (src / "temp_crop.jpg").exists()
 
 
 class TestStep5Vectorize:
-    def test_creates_vector_json(self, tmp_path):
+    def test_creates_vector_json(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "img.jpg")
@@ -240,7 +227,7 @@ class TestStep5Vectorize:
 
 
 class TestStep6DWPose:
-    def test_creates_pose_json(self, tmp_path):
+    def test_creates_pose_json(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "pose.jpg")
@@ -265,7 +252,7 @@ class TestStep6DWPose:
 
 
 class TestStep7Colors:
-    def test_creates_colors_json(self, tmp_path):
+    def test_creates_colors_json(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "colorful.jpg")
@@ -289,7 +276,7 @@ class TestStep7Colors:
 
 
 class TestStep8Nsfw:
-    def test_creates_nsfw_json(self, tmp_path):
+    def test_creates_nsfw_json(self, tmp_path: Path) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "safe.jpg")

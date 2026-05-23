@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 class Step3VisualDups(BaseStep):
-    def __init__(self, fs_service: FileSystemServicePort, visual_detector: VisualDupDetectorPort):
+    def __init__(
+        self, fs_service: FileSystemServicePort, visual_detector: VisualDupDetectorPort
+    ):
         self._fs = fs_service
         self._detector = visual_detector
 
@@ -39,7 +41,9 @@ class Step3VisualDups(BaseStep):
             try:
                 phash = self._detector.calculate_phash(file_path)
             except Exception:
-                logger.warning(f"Skipping file {file_path.name}, failed to calculate phash")
+                logger.warning(
+                    f"Skipping file {file_path.name}, failed to calculate phash"
+                )
                 skipped_count += 1
                 continue
             modified_at = self._fs.get_file_modified_time(file_path)
@@ -47,7 +51,7 @@ class Step3VisualDups(BaseStep):
                 file_hash=FileHash(algorithm="phash", value=phash),
                 file_path=file_vo,
                 file_size=self._fs.get_file_size(file_path),
-                modified_at=modified_at
+                modified_at=modified_at,
             )
             hash_map[phash].append(entry)
 
@@ -85,5 +89,5 @@ class Step3VisualDups(BaseStep):
         return StepResultDTO(
             step_number=config.step_number,
             status="COMPLETED",
-            message=f"Found {groups_found} visual duplicate groups. Report saved. Skipped {skipped_count} files."
+            message=f"Found {groups_found} visual duplicate groups. Report saved. Skipped {skipped_count} files.",
         )

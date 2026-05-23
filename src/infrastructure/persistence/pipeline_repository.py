@@ -8,6 +8,7 @@ from src.application.ports import PipelineRepository
 from src.domain.pipeline.entities import PipelineAggregate, PipelineStep
 from src.domain.pipeline.value_objects import PipelineStatus, StepStatus, StepConfig
 
+
 class PipelineMapper:
     @staticmethod
     def to_dict(pipeline: PipelineAggregate) -> dict:
@@ -26,13 +27,18 @@ class PipelineMapper:
                     "step_name": step.step_name,
                     "status": step.status.value,
                     "config": {"params": step.config.params},
-                    "started_at": step.started_at.isoformat() if step.started_at else None,
-                    "completed_at": step.completed_at.isoformat() if step.completed_at else None,
+                    "started_at": step.started_at.isoformat()
+                    if step.started_at
+                    else None,
+                    "completed_at": step.completed_at.isoformat()
+                    if step.completed_at
+                    else None,
                     "error": step.error,
                     "created_at": step.created_at.isoformat(),
-                    "updated_at": step.updated_at.isoformat()
-                } for step in pipeline.steps
-            ]
+                    "updated_at": step.updated_at.isoformat(),
+                }
+                for step in pipeline.steps
+            ],
         }
 
     @staticmethod
@@ -44,12 +50,17 @@ class PipelineMapper:
                 step_name=step_data["step_name"],
                 status=StepStatus(step_data["status"]),
                 config=StepConfig(params=step_data["config"].get("params", {})),
-                started_at=datetime.fromisoformat(step_data["started_at"]) if step_data.get("started_at") else None,
-                completed_at=datetime.fromisoformat(step_data["completed_at"]) if step_data.get("completed_at") else None,
+                started_at=datetime.fromisoformat(step_data["started_at"])
+                if step_data.get("started_at")
+                else None,
+                completed_at=datetime.fromisoformat(step_data["completed_at"])
+                if step_data.get("completed_at")
+                else None,
                 error=step_data.get("error"),
                 created_at=datetime.fromisoformat(step_data["created_at"]),
-                updated_at=datetime.fromisoformat(step_data["updated_at"])
-            ) for step_data in data.get("steps", [])
+                updated_at=datetime.fromisoformat(step_data["updated_at"]),
+            )
+            for step_data in data.get("steps", [])
         ]
         return PipelineAggregate(
             name=data["name"],
@@ -61,6 +72,7 @@ class PipelineMapper:
             source_path=Path(data["source_path"]),
             output_path=Path(data["output_path"]),
         )
+
 
 class JsonPipelineRepository(PipelineRepository):
     def __init__(self, storage_dir: Path):
