@@ -24,7 +24,6 @@ class SmartCropStep(BaseStep):
                 self._segmenter = self._segmenter_factory
             else:
                 from src.infrastructure.ai.sam3_client import SAM3Client
-                # Путь к весам ожидается рядом с проектом
                 import sys
                 from pathlib import Path
                 script_dir = Path(sys.argv[0]).parent.resolve() if hasattr(sys, 'argv') else Path.cwd()
@@ -36,13 +35,22 @@ class SmartCropStep(BaseStep):
             raise RuntimeError("prepare() was not called before execute()")
 
         source_path = Path(config.params.get("source_path", "."))
+        if not source_path.is_dir():
+            return StepResultDTO.failed(
+                sequence_number=config.sequence_number,
+                message=f"Source path is not a directory: {source_path}",
+            )
 
         mode = config.params.get("crop_mode", "square")
         if mode not in ["square", "mask", "transparent"]:
-            raise ValueError(f"Unsupported crop mode: {mode}")
+            return StepResultDTO.failed(
+                sequence_number=config.sequence_number,
+                message=f"Unsupported crop mode: {mode}",
+            )
 
         all_files = self._storage.scan_directory(source_path, recursive=False)
         cropped_count = 0
+        errors: list[str] = []
 
         for file_path in all_files:
             if not file_path.is_file():
@@ -53,30 +61,32 @@ class SmartCropStep(BaseStep):
 
                 if cropped_image_path and self._storage.path_exists(cropped_image_path):
                     if cropped_image_path != file_path:
-                        dest_path = source_path / cropped_image_path.name
-
-                        if self._storage.path_exists(dest_path) and dest_path != file_path:
-                            stem = dest_path.stem
-                            suffix = dest_path.suffix
-                            counter = 1
-                            new_dest = dest_path
-                            while self._storage.path_exists(new_dest):
-                                new_dest = source_path / f"{stem}_{counter}{suffix}"
-                                counter += 1
-                            dest_path = new_dest
-
-                        self._storage.move_file(cropped_image_path, dest_path)
-
+                        # Заменяем оригинал кропнутой версией
+                        try:
+                            self._storage.move_file(cropped_image_path, file_path)
+                        except Exception as move_err:
+                            logger.warning(
+                                f"Failed to replace original {file_path.name} with crop: {move_err}"
+                            )
+                            errors.append(f"{file_path.name}: move failed: {move_err}")
+                            continue
                     cropped_count += 1
                 else:
                     logger.warning(
-                        f"Segmenter returned non-existent path for {file_path.name}"
+                        f"Segmenter returned non-existent path for {file_path.name}: {cropped_image_path}"
                     )
             except Exception as e:
-                logger.warning(f"Failed to crop {file_path.name}: {e}")
+                err_msg = f"Failed to crop {file_path.name}: {e}"
+                logger.warning(err_msg)
+                errors.append(err_msg)
+
+        msg = f"Successfully cropped {cropped_count} images in '{mode}' mode."
+        if errors:
+            msg += f" Errors: {len(errors)}."
 
         return StepResultDTO.completed(
             sequence_number=config.sequence_number,
-            message=f"Successfully cropped {cropped_count} images in '{mode}' mode.",
+            message=msg,
             processed_count=cropped_count,
+            errors=errors if errors else None,
         )

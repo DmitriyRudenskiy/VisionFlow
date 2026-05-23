@@ -64,7 +64,7 @@ class PipelineOrchestrator:
     ) -> StepResultDTO:
         """Непосредственное выполнение логики шага (без управления состоянием агрегата)."""
         step_instance = self._registry.get(step_num)
-        step_instance.prepare()  # Ленивая инициализация
+        step_instance.prepare()
         step_config = self._build_step_config(step_num, config)
         return step_instance.execute(step_config)
 
@@ -120,7 +120,6 @@ class PipelineOrchestrator:
     ) -> Generator[StepResultDTO, None, None]:
         """Выполняет группу шагов параллельно."""
 
-        # 1. Подготовка и фильтрация уже выполненных шагов
         pending_steps: List[int] = []
         for step_num in group_steps:
             existing_step = pipeline.find_step(step_num)
@@ -140,7 +139,6 @@ class PipelineOrchestrator:
         if not pending_steps:
             return
 
-        # 2. Параллельное выполнение
         executor = ThreadPoolExecutor(max_workers=len(pending_steps), thread_name_prefix="parallel_step")
         future_to_step = {
             executor.submit(self._execute_step_logic, num, config): num
@@ -156,9 +154,9 @@ class PipelineOrchestrator:
                     yield result
 
                     if result.status == "FAILED" and config.stop_on_error:
-                        # Отмена оставшихся задач при ошибке
                         for f in future_to_step:
-                            f.cancel()
+                            if not f.done():
+                                f.cancel()
                         return
                 except Exception as e:
                     logger.exception(f"Unhandled exception in parallel step {step_num}")
@@ -170,7 +168,8 @@ class PipelineOrchestrator:
                     yield StepResultDTO.failed(step_num, str(e), [str(e)])
                     if config.stop_on_error:
                         for f in future_to_step:
-                            f.cancel()
+                            if not f.done():
+                                f.cancel()
                         return
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -179,6 +178,11 @@ class PipelineOrchestrator:
             self, config: PipelineConfigDTO, pipeline_id: Optional[UUID] = None
     ) -> Generator[StepResultDTO, None, None]:
         """Запускает или возобновляет выполнение пайплайна."""
+        if not config.source_path.exists():
+            raise ValueError(f"Source path does not exist: {config.source_path}")
+        if not config.source_path.is_dir():
+            raise ValueError(f"Source path is not a directory: {config.source_path}")
+
         if pipeline_id:
             pipeline = self._repo.find_by_id(pipeline_id)
             if not pipeline:
@@ -189,7 +193,6 @@ class PipelineOrchestrator:
             pipeline = self.create_pipeline(config.source_path, config.output_path)
             self._save_pipeline(pipeline)
 
-        # Определение списка шагов для выполнения
         if config.steps_to_run is not None:
             step_numbers = sorted(config.steps_to_run)
         elif pipeline_id:
@@ -197,7 +200,6 @@ class PipelineOrchestrator:
         else:
             step_numbers = self._registry.get_step_numbers()
 
-        # Добавление шагов в агрегат, если их там нет
         available_step_numbers = self._registry.get_step_numbers()
         existing_step_numbers = {s.sequence_number for s in pipeline.steps}
         for step_num in step_numbers:
@@ -213,22 +215,17 @@ class PipelineOrchestrator:
                     logger.warning(f"Step {step_num} requested but not found in registry.")
         self._save_pipeline(pipeline)
 
-        # Основной цикл выполнения
         completed_parallel: Set[int] = set()
         for step_num in step_numbers:
-            # Пропуск уже выполненных в рамках этой сессии параллельных групп
             if step_num in completed_parallel:
                 continue
 
-            # Проверка статуса пайплайна (если упали ранее)
             if pipeline.status == PipelineStatus.FAILED and config.stop_on_error:
                 return
 
-            # Определение группы параллельности
             group = next((g for g in self.PARALLEL_GROUPS if step_num in g), None)
 
             if group:
-                # Исключаем шаги, которые уже могли быть выполнены или запланированы
                 group_steps = [s for s in step_numbers if s in group and s not in completed_parallel]
                 if not group_steps:
                     continue
@@ -236,7 +233,6 @@ class PipelineOrchestrator:
                 yield from self._execute_parallel_group(pipeline, group_steps, config)
                 completed_parallel.update(group_steps)
             else:
-                # Последовательное выполнение
                 existing_step = pipeline.find_step(step_num)
                 if existing_step and existing_step.status == StepStatus.COMPLETED:
                     yield StepResultDTO.skipped(step_num)

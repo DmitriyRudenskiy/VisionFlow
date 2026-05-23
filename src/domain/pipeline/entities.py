@@ -55,7 +55,7 @@ class PipelineStep:
             )
         self.status = StepStatus.COMPLETED
         self.completed_at = datetime.now(timezone.utc)
-        self.error = None  # Сбрасываем ошибку при успешном завершении
+        self.error = None
         self.update_modified_timestamp()
 
     def fail(self, error: str) -> None:
@@ -125,6 +125,7 @@ class PipelineAggregate:
                 step.error = "Pipeline was interrupted during execution"
                 step.completed_at = datetime.now(timezone.utc)
                 step.update_modified_timestamp()
+        self._update_aggregate_status()
         self.update_modified_timestamp()
 
     def start_step(self, sequence_number: int) -> None:
@@ -143,8 +144,7 @@ class PipelineAggregate:
     def complete_step(self, sequence_number: int) -> None:
         step = self._get_step(sequence_number)
         step.complete()
-        if all(s.status == StepStatus.COMPLETED for s in self.steps):
-            self.status = PipelineStatus.COMPLETED
+        self._update_aggregate_status()
         self.update_modified_timestamp()
 
     def fail_step(self, sequence_number: int, error: str, critical: bool = True) -> None:
@@ -152,4 +152,23 @@ class PipelineAggregate:
         step.fail(error)
         if critical:
             self.status = PipelineStatus.FAILED
+        else:
+            self._update_aggregate_status()
         self.update_modified_timestamp()
+
+    def _update_aggregate_status(self) -> None:
+        """Обновляет статус агрегата на основе статусов шагов."""
+        if not self.steps:
+            self.status = PipelineStatus.PENDING
+            return
+
+        statuses = {s.status for s in self.steps}
+
+        if statuses == {StepStatus.COMPLETED}:
+            self.status = PipelineStatus.COMPLETED
+        elif StepStatus.RUNNING in statuses:
+            self.status = PipelineStatus.RUNNING
+        elif StepStatus.FAILED in statuses:
+            self.status = PipelineStatus.FAILED
+        elif StepStatus.PENDING in statuses:
+            self.status = PipelineStatus.PENDING

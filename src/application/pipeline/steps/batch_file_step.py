@@ -35,6 +35,12 @@ class BatchFileProcessingStep(BaseStep):
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
         source_path = Path(config.params.get("source_path", "."))
+        if not source_path.is_dir():
+            return StepResultDTO.failed(
+                sequence_number=config.sequence_number,
+                message=f"Source path is not a directory: {source_path}",
+            )
+
         output_dir = source_path / self.output_subdirectory
         self._storage.create_directory(output_dir)
 
@@ -51,7 +57,6 @@ class BatchFileProcessingStep(BaseStep):
 
             out_json = output_dir / f"{file_path.stem}{self.output_suffix}"
 
-            # Идемпотентность: пропуск, если файл уже существует
             if self._storage.path_exists(out_json):
                 skipped_count += 1
                 continue
@@ -71,13 +76,11 @@ class BatchFileProcessingStep(BaseStep):
 
         total = processed_count + skipped_count + error_count
 
-        # Формируем детальное сообщение
         msg_parts = [f"Processed {processed_count}/{total} files"]
         if skipped_count:
             msg_parts.append(f"skipped {skipped_count} (exist)")
         if error_count:
             msg_parts.append(f"failed {error_count}")
-            # Добавляем детали ошибок в message
             details = "; ".join(error_details[:3])
             if len(error_details) > 3:
                 details += f" (+{len(error_details) - 3} more)"

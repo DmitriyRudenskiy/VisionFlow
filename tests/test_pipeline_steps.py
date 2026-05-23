@@ -193,7 +193,26 @@ class TestSmartCropStep:
         assert result.status == "COMPLETED"
         assert result.processed_count == 1
         assert not temp_crop.exists()
-        assert (src / "temp_crop.jpg").exists()
+        # Оригинал должен быть заменён кропнутой версией
+        assert (src / "pic2.jpg").exists()
+        assert (src / "pic2.jpg").read_bytes() == b"cropped"
+
+    def test_smart_crop_reports_errors(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
+        src = tmp_path / "source"
+        src.mkdir()
+        create_test_file(src, "fail.jpg")
+
+        segmenter = MagicMock()
+        segmenter.crop_image.side_effect = RuntimeError("Segmentation failed")
+
+        step = SmartCropStep(file_storage, segmenter=segmenter)
+        config = make_step_config(4, src)
+        result = step.execute(config)
+
+        assert result.status == "COMPLETED"
+        assert result.processed_count == 0
+        assert result.errors is not None
+        assert any("Segmentation failed" in err for err in result.errors)
 
 
 class TestEmbeddingExtractionStep:

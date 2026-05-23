@@ -16,6 +16,11 @@ class FlattenDirectoriesStep(BaseStep):
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
         source_path = Path(config.params.get("source_path", "."))
+        if not source_path.is_dir():
+            return StepResultDTO.failed(
+                sequence_number=config.sequence_number,
+                message=f"Source path is not a directory: {source_path}",
+            )
 
         all_files = self._storage.scan_directory(source_path, recursive=True)
         moved_count = 0

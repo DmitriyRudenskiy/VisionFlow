@@ -89,14 +89,6 @@ class SAM3Client(ImageSegmentationPort):
             return image
         xmin, ymin, xmax, ymax = bbox
 
-        # padding 0% by default (можно вынести в параметр при необходимости)
-        pad_w = int((xmax - xmin) * 0.0)
-        pad_h = int((ymax - ymin) * 0.0)
-        xmin -= pad_w
-        ymin -= pad_h
-        xmax += pad_w
-        ymax += pad_h
-
         rect_w = xmax - xmin
         rect_h = ymax - ymin
         square_size = max(rect_w, rect_h)
@@ -143,7 +135,6 @@ class SAM3Client(ImageSegmentationPort):
         if mode == "transparent" and image.mode != "RGBA":
             image = image.convert("RGBA")
 
-        # --- Детекция ---
         masks: list[np.ndarray] = []
         prompts = ["person"]
         fallback = ["object", "thing", "item", "woman", "people", "character"]
@@ -169,7 +160,6 @@ class SAM3Client(ImageSegmentationPort):
             logger.warning(f"No objects found in {image_path}, returning original")
             return image_path
 
-        # Берём самый крупный объект по площади bbox
         def _area(m: np.ndarray) -> int:
             bb = self._mask_bbox(m)
             return 0 if bb is None else (bb[2] - bb[0]) * (bb[3] - bb[1])

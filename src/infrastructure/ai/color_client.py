@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 try:
     from sklearn.cluster import KMeans  # type: ignore[import-untyped]
-
     _SKLEARN_AVAILABLE = True
 except Exception:
     _SKLEARN_AVAILABLE = False
@@ -22,7 +21,6 @@ except Exception:
 
 try:
     import cv2
-
     _CV2_AVAILABLE = True
 except Exception:
     _CV2_AVAILABLE = False
@@ -31,20 +29,21 @@ except Exception:
 class ColorExtractorClient(ColorPaletteExtractorPort):
     """Извлечение палитры через KMeans кластеризацию."""
 
-    # Ужимаем большие изображения для скорости
     MAX_PIXELS = 500_000
 
     def extract_palette(self, image_path: Path, num_colors: int = 20) -> list[dict[str, Any]]:
-        image = Image.open(image_path).convert("RGB")
+        try:
+            image = Image.open(image_path).convert("RGB")
+        except Exception as e:
+            logger.error(f"Cannot open image {image_path}: {e}")
+            raise RuntimeError(f"Failed to open image {image_path}: {e}") from e
 
-        # Resize для производительности
         width, height = image.size
         total_pixels = width * height
         if total_pixels > self.MAX_PIXELS:
             ratio = (self.MAX_PIXELS / total_pixels) ** 0.5
             new_w = max(1, int(width * ratio))
             new_h = max(1, int(height * ratio))
-            # Используем LANCZOS (высокое качество)
             image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
             logger.debug(f"Resized {width}×{height} → {new_w}×{new_h} for color extraction")
 
@@ -64,7 +63,6 @@ class ColorExtractorClient(ColorPaletteExtractorPort):
             labels = kmeans.labels_
         elif _CV2_AVAILABLE:
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 300, 0.2)
-            # cv2.kmeans требует float32
             best_labels = np.empty((pixels.shape[0], 1), dtype=np.int32)
             _, labels, centers = cv2.kmeans(
                 pixels, num_colors, best_labels, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
@@ -74,7 +72,6 @@ class ColorExtractorClient(ColorPaletteExtractorPort):
         else:
             raise RuntimeError("Neither sklearn nor cv2 is installed.")
 
-        # Быстрый подсчет частот через bincount (оптимизация)
         counts = np.bincount(labels, minlength=num_colors)
         total = len(labels)
 
@@ -91,6 +88,5 @@ class ColorExtractorClient(ColorPaletteExtractorPort):
                 "percentage": round(count / total * 100, 2),
             })
 
-        # Сортировка по убыванию процента
         palette.sort(key=lambda c: c["percentage"], reverse=True)
         return palette

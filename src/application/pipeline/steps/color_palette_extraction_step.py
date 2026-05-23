@@ -13,14 +13,14 @@ from src.domain.metadata.value_objects import ColorEntry
 class ColorPaletteExtractionStep(BatchFileProcessingStep):
     def __init__(self, storage: StoragePort, extractor: Optional[ColorPaletteExtractorPort] = None):
         super().__init__(storage)
-        self._extractor_factory = extractor
+        self._extractor_source = extractor
         self._extractor: Optional[ColorPaletteExtractorPort] = None
         self._num_colors = 20
 
     def prepare(self) -> None:
         if self._extractor is None:
-            if self._extractor_factory is not None:
-                self._extractor = self._extractor_factory
+            if self._extractor_source is not None:
+                self._extractor = self._extractor_source
             else:
                 from src.infrastructure.ai.color_client import ColorExtractorClient
                 self._extractor = ColorExtractorClient()
@@ -34,7 +34,7 @@ class ColorPaletteExtractionStep(BatchFileProcessingStep):
         return ".json"
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
-        self._num_colors = config.params.get("num_colors", 20)  # ← Дефолт 20
+        self._num_colors = config.params.get("num_colors", 20)
         return super().execute(config)
 
     def process_file(self, file_path: Path) -> Dict[str, Any]:
@@ -49,7 +49,7 @@ class ColorPaletteExtractionStep(BatchFileProcessingStep):
         return {
             "file": file_path.name,
             "colors": [
-                {"rgb": list(c.rgb), "hex": c.hex, "percent": c.percentage}
+                {"rgb": list(c.rgb), "hex": c.hex, "percentage": c.percentage}
                 for c in color_entries
             ],
         }
