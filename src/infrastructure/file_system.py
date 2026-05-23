@@ -9,7 +9,6 @@ from typing import Any, List
 
 from src.application.ports import StoragePort
 
-
 # Расширения, которые считаем изображениями
 IMAGE_EXTENSIONS: frozenset[str] = frozenset(
     {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".avif"}
@@ -21,15 +20,16 @@ class FileSystemStorage(StoragePort):
         if not path.is_dir():
             return []
         pattern = "**/*" if recursive else "*"
-        all_files = [p for p in path.glob(pattern) if p.is_file()]
-        # Фильтруем только изображения
+        # Используем glob и фильтруем
+        # Сортировка обеспечивает предсказуемый порядок обработки
         return sorted([
-            p for p in all_files
-            if p.suffix.lower() in IMAGE_EXTENSIONS
+            p for p in path.glob(pattern)
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
         ])
 
     def move_file(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # Удаляем целевой файл, если он существует и отличается от источника
         if destination.exists() and destination != source:
             if destination.is_file():
                 destination.unlink(missing_ok=True)

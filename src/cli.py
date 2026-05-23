@@ -43,32 +43,26 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 def build_container() -> PipelineOrchestrator:
-    """Собирает все зависимости и регистрирует шаги пайплайна.
-
-    AI-клиенты передаются как None — они инициализируются лениво
-    в prepare() только при выполнении соответствующего шага.
-    """
+    """Собирает зависимости и регистрирует шаги."""
     repo = JsonPipelineRepository(
         storage_dir=Path("./data/pipelines"),
         serializer=JsonPipelineSerializer(),
     )
     fs_service = FileSystemStorage()
 
-    logger.info("Initializing pipeline registry (AI models loaded lazily)...")
+    logger.info("Initializing pipeline registry...")
 
     registry = StepRegistry()
-    # Шаги 0-3: не требуют AI-моделей
     registry.register(0, FlattenDirectoriesStep(fs_service))
     registry.register(1, PrepareImagesStep(fs_service))
     registry.register(2, ExactDeduplicationStep(fs_service))
-    registry.register(3, VisualDeduplicationStep(fs_service, detector=None))  # lazy
+    registry.register(3, VisualDeduplicationStep(fs_service, detector=None))
 
-    # Шаги 4-8: AI-клиенты = None → создадутся в prepare()
-    registry.register(4, SmartCropStep(fs_service, segmenter=None))  # lazy SAM3
-    registry.register(5, EmbeddingExtractionStep(fs_service, extractor=None))  # lazy Qwen-VL
-    registry.register(6, PoseExtractionStep(fs_service, extractor=None))  # lazy DWPose
-    registry.register(7, ColorPaletteExtractionStep(fs_service, extractor=None))  # lazy ColorExtractor
-    registry.register(8, ContentSafetyClassificationStep(fs_service, classifier=None))  # lazy NSFW
+    registry.register(4, SmartCropStep(fs_service, segmenter=None))
+    registry.register(5, EmbeddingExtractionStep(fs_service, extractor=None))
+    registry.register(6, PoseExtractionStep(fs_service, extractor=None))
+    registry.register(7, ColorPaletteExtractionStep(fs_service, extractor=None))
+    registry.register(8, ContentSafetyClassificationStep(fs_service, classifier=None))
 
     return PipelineOrchestrator(registry, repo)
 
@@ -112,7 +106,6 @@ def main() -> None:
     orchestrator = build_container()
     available_steps = orchestrator.get_available_steps()
 
-    # Валидация запрашиваемых шагов
     if args.steps:
         invalid_steps = set(args.steps) - set(available_steps)
         if invalid_steps:
@@ -149,6 +142,7 @@ def main() -> None:
         logger.exception("Critical unhandled error during pipeline execution.")
         sys.exit(1)
 
+
 def _print_summary(results: List) -> None:
     logger.info("\n" + "=" * 50)
     logger.info("PIPELINE EXECUTION SUMMARY")
@@ -176,7 +170,6 @@ def _print_summary(results: List) -> None:
                     logger.error(f"   └── Error: {err}")
         else:
             logger.info(msg)
-            # Показываем ошибки даже для COMPLETED (если были частичные сбои)
             if res.errors:
                 for err in res.errors:
                     logger.warning(f"   └── Warning: {err}")

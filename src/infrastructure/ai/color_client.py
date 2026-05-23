@@ -31,19 +31,20 @@ except Exception:
 class ColorExtractorClient(ColorPaletteExtractorPort):
     """Извлечение палитры через KMeans кластеризацию."""
 
-    # Ужимаем большие изображения для скорости, сохраняя достаточно пикселей
-    MAX_PIXELS = 500_000  # ~707×707 или ~500k пикселей
+    # Ужимаем большие изображения для скорости
+    MAX_PIXELS = 500_000
 
     def extract_palette(self, image_path: Path, num_colors: int = 20) -> list[dict[str, Any]]:
         image = Image.open(image_path).convert("RGB")
 
-        # Ужимаем если слишком много пикселей (ускоряет KMeans в 2-4×)
+        # Resize для производительности
         width, height = image.size
         total_pixels = width * height
         if total_pixels > self.MAX_PIXELS:
             ratio = (self.MAX_PIXELS / total_pixels) ** 0.5
             new_w = max(1, int(width * ratio))
             new_h = max(1, int(height * ratio))
+            # Используем LANCZOS (высокое качество)
             image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
             logger.debug(f"Resized {width}×{height} → {new_w}×{new_h} for color extraction")
 
@@ -51,20 +52,19 @@ class ColorExtractorClient(ColorPaletteExtractorPort):
         pixels = img_array.reshape(-1, 3).astype(np.float32)
 
         if _SKLEARN_AVAILABLE:
-            # Обычный KMeans — точнее MiniBatch, приемлемо быстро на ужатых картинках
             kmeans = KMeans(
                 n_clusters=num_colors,
                 random_state=42,
                 n_init=10,
                 max_iter=300,
-                algorithm="lloyd",  # Классический Lloyd (стабильнее elkan на малых данных)
+                algorithm="lloyd",
             )
             kmeans.fit(pixels)
             colors = kmeans.cluster_centers_.astype(int)
             labels = kmeans.labels_
         elif _CV2_AVAILABLE:
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 300, 0.2)
-            # cv2.kmeans требует float32 и explicit bestLabels array
+            # cv2.kmeans требует float32
             best_labels = np.empty((pixels.shape[0], 1), dtype=np.int32)
             _, labels, centers = cv2.kmeans(
                 pixels, num_colors, best_labels, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
@@ -72,17 +72,17 @@ class ColorExtractorClient(ColorPaletteExtractorPort):
             colors = centers.astype(int)
             labels = labels.flatten()
         else:
-            raise RuntimeError(
-                "Neither sklearn nor cv2 is installed. "
-                "Install scikit-learn for best results."
-            )
+            raise RuntimeError("Neither sklearn nor cv2 is installed.")
 
-        # Считаем частоты кластеров
-        unique, counts = np.unique(labels, return_counts=True)
+        # Быстрый подсчет частот через bincount (оптимизация)
+        counts = np.bincount(labels, minlength=num_colors)
         total = len(labels)
 
         palette = []
-        for idx, count in zip(unique, counts):
+        for idx, count in enumerate(counts):
+            if count == 0:
+                continue
+
             rgb = colors[idx].tolist()
             hex_color = f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
             palette.append({
@@ -91,5 +91,6 @@ class ColorExtractorClient(ColorPaletteExtractorPort):
                 "percentage": round(count / total * 100, 2),
             })
 
+        # Сортировка по убыванию процента
         palette.sort(key=lambda c: c["percentage"], reverse=True)
         return palette

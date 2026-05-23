@@ -39,10 +39,11 @@ class BatchFileProcessingStep(BaseStep):
         self._storage.create_directory(output_dir)
 
         all_files = self._storage.scan_directory(source_path, recursive=False)
+
         processed_count = 0
         skipped_count = 0
         error_count = 0
-        error_details: List[str] = []  # ← Расшифровка ошибок
+        error_details: List[str] = []
 
         for file_path in all_files:
             if not file_path.is_file():
@@ -64,30 +65,28 @@ class BatchFileProcessingStep(BaseStep):
                 processed_count += 1
             except Exception as e:
                 error_msg = f"{file_path.name}: {type(e).__name__}: {e}"
-                logger.warning(
-                    f"Failed to process {file_path.name} in {self.__class__.__name__}: {e}"
-                )
+                logger.warning(f"Failed to process {file_path.name} in {self.__class__.__name__}: {e}")
                 error_details.append(error_msg)
                 error_count += 1
 
         total = processed_count + skipped_count + error_count
 
-        # Формируем читаемое сообщение
-        parts = [f"Processed {processed_count}/{total} files"]
+        # Формируем детальное сообщение
+        msg_parts = [f"Processed {processed_count}/{total} files"]
         if skipped_count:
-            parts.append(f"skipped {skipped_count}")
+            msg_parts.append(f"skipped {skipped_count} (exist)")
         if error_count:
-            parts.append(f"errors {error_count}")
-            # Добавляем детали ошибок в message для видимости в CLI
-            details = "; ".join(error_details[:3])  # Первые 3 ошибки
+            msg_parts.append(f"failed {error_count}")
+            # Добавляем детали ошибок в message
+            details = "; ".join(error_details[:3])
             if len(error_details) > 3:
                 details += f" (+{len(error_details) - 3} more)"
-            parts.append(f"[{details}]")
+            msg_parts.append(f"[{details}]")
 
         return StepResultDTO.completed(
             sequence_number=config.sequence_number,
-            message=".".join(parts) + ".",
+            message=". ".join(msg_parts) + ".",
             processed_count=processed_count,
-            skipped_count=skipped_count + error_count,
+            skipped_count=skipped_count,
             errors=error_details if error_details else None,
         )

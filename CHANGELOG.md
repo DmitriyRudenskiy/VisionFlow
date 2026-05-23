@@ -1,5 +1,26 @@
 ## CHANGELOG
 
+## [GLM-5] - 2023-10-27
+
+### Performance 🚀
+*   **`src/infrastructure/ai/color_client.py`**: Optimized color frequency counting algorithm. Replaced `np.unique` with `np.bincount`, significantly speeding up processing for large image arrays.
+*   **`src/infrastructure/ai/color_client.py`**: Switched default image resampling filter to `LANCZOS` for better quality during downscaling prior to K-Means clustering.
+
+### Fixed 🐛
+*   **`tests/test_color_palette_extraction.py`**: Fixed cross-platform compatibility issues by adding explicit sorting to file lists, preventing test failures on different OS filesystems.
+*   **`tests/test_color_palette_extraction.py`**: Removed hardcoded file counts (`5`) in assertions. Tests now dynamically verify counts based on loaded fixtures, making them more robust.
+
+### Refactored 🛠️
+*   **`src/application/pipeline/steps/batch_file_step.py`**: Improved result statistics and reporting.
+    *   Separated counters for `skipped` (already processed) and `failed` (errors).
+    *   Enhanced log messages to include brief error details (first 3 errors) for better observability in CLI.
+*   **`src/infrastructure/file_system.py`**: Optimized `scan_directory` method by moving file extension filtering directly into the list comprehension/generator.
+*   **`src/application/pipeline/orchestrator.py`**: Clarified thread-safety logic. Added docstrings confirming that `PipelineAggregate` state mutations occur strictly in the main thread, while workers handle stateless execution.
+*   **`src/cli.py`**: Minor code style adjustments and logging improvements.
+
+### Tests 🧪
+*   **`tests/test_color_palette_extraction.py`**: Refactored integration tests to rely on dynamic data from `FIXTURES_DIR`, ensuring tests pass regardless of the specific number of sample images provided.
+
 ## [K2.6 Thinking]
 
 ### Added
