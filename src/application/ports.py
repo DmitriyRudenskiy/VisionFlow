@@ -25,7 +25,14 @@ class StoragePort(ABC):
     """Порт для файловых операций и персистентности данных"""
 
     @abstractmethod
-    def scan_directory(self, path: Path, recursive: bool = True) -> list[Path]: ...
+    def scan_directory(self, path: Path, recursive: bool = True) -> list[Path]:
+        """Возвращает список файлов изображений (по расширению) в директории."""
+        ...
+
+    @abstractmethod
+    def get_all_files(self, path: Path, recursive: bool = True) -> list[Path]:
+        """Возвращает список всех файлов в директории без фильтрации."""
+        ...
 
     @abstractmethod
     def move_file(self, source: Path, destination: Path) -> None: ...
