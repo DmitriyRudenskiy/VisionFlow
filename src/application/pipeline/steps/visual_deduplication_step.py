@@ -1,7 +1,11 @@
+# src/application/pipeline/steps/visual_deduplication_step.py
+from __future__ import annotations
+
 from collections import defaultdict
 from pathlib import Path
 import logging
 import html
+from typing import Optional
 
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
@@ -15,11 +19,23 @@ logger = logging.getLogger(__name__)
 
 
 class VisualDeduplicationStep(BaseStep):
-    def __init__(self, storage: StoragePort, detector: VisualDuplicateDetectorPort):
+    def __init__(self, storage: StoragePort, detector: Optional[VisualDuplicateDetectorPort] = None):
         self._storage = storage
-        self._detector = detector
+        self._detector_factory = detector
+        self._detector: Optional[VisualDuplicateDetectorPort] = None
+
+    def prepare(self) -> None:
+        if self._detector is None:
+            if self._detector_factory is not None:
+                self._detector = self._detector_factory
+            else:
+                from src.infrastructure.ai.vit_client import VisionTransformerClient
+                self._detector = VisionTransformerClient()
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
+        if self._detector is None:
+            raise RuntimeError("prepare() was not called before execute()")
+
         source_path = Path(config.params.get("source_path", "."))
         visual_dups_path = source_path / "_visual_duplicates"
         self._storage.create_directory(visual_dups_path)

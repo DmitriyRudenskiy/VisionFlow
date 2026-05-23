@@ -30,7 +30,7 @@ class PipelineOrchestrator:
     def __init__(self, step_registry: StepRegistry, pipeline_repo: PipelineRepository) -> None:
         self._registry = step_registry
         self._repo = pipeline_repo
-        self._save_lock = threading.Lock()
+        self._save_lock = threading.RLock()
 
     def get_available_steps(self) -> List[int]:
         """Возвращает отсортированный список номеров доступных шагов."""
@@ -64,6 +64,7 @@ class PipelineOrchestrator:
     ) -> StepResultDTO:
         """Непосредственное выполнение логики шага (без управления состоянием агрегата)."""
         step_instance = self._registry.get(step_num)
+        step_instance.prepare()  # Ленивая инициализация
         step_config = self._build_step_config(step_num, config)
         return step_instance.execute(step_config)
 
@@ -74,16 +75,17 @@ class PipelineOrchestrator:
             result: StepResultDTO,
             stop_on_error: bool
     ) -> None:
-        """Обработка результата шага и обновление состояния пайплайна."""
-        if result.status == "FAILED":
-            pipeline.fail_step(
-                step_num,
-                result.message or "Step returned FAILED status",
-                critical=stop_on_error,
-            )
-        else:
-            pipeline.complete_step(step_num)
-        self._save_pipeline(pipeline)
+        """Обработка результата шага и обновление состояния пайплайна (потокобезопасно)."""
+        with self._save_lock:
+            if result.status == "FAILED":
+                pipeline.fail_step(
+                    step_num,
+                    result.message or "Step returned FAILED status",
+                    critical=stop_on_error,
+                )
+            else:
+                pipeline.complete_step(step_num)
+            self._repo.save(pipeline)
 
     def _run_single_step(
             self, pipeline: PipelineAggregate, step_num: int, config: PipelineConfigDTO
@@ -139,37 +141,39 @@ class PipelineOrchestrator:
             return
 
         # 2. Параллельное выполнение
-        with ThreadPoolExecutor(max_workers=len(pending_steps), thread_name_prefix="parallel_step") as executor:
-            future_to_step = {
-                executor.submit(self._execute_step_logic, num, config): num
-                for num in pending_steps
-            }
+        executor = ThreadPoolExecutor(max_workers=len(pending_steps), thread_name_prefix="parallel_step")
+        future_to_step = {
+            executor.submit(self._execute_step_logic, num, config): num
+            for num in pending_steps
+        }
 
-            try:
-                for future in as_completed(future_to_step):
-                    step_num = future_to_step[future]
+        try:
+            for future in as_completed(future_to_step):
+                step_num = future_to_step[future]
+                try:
+                    result = future.result()
+                    self._process_step_result(pipeline, step_num, result, config.stop_on_error)
+                    yield result
+
+                    if result.status == "FAILED" and config.stop_on_error:
+                        # Отмена оставшихся задач при ошибке
+                        for f in future_to_step:
+                            f.cancel()
+                        return
+                except Exception as e:
+                    logger.exception(f"Unhandled exception in parallel step {step_num}")
                     try:
-                        result = future.result()
-                        self._process_step_result(pipeline, step_num, result, config.stop_on_error)
-                        yield result
-
-                        if result.status == "FAILED" and config.stop_on_error:
-                            # Отмена оставшихся задач при ошибке
-                            for f in future_to_step:
-                                f.cancel()
-                            return
-                    except Exception as e:
-                        logger.exception(f"Unhandled exception in parallel step {step_num}")
                         pipeline.fail_step(step_num, str(e), critical=config.stop_on_error)
                         self._save_pipeline(pipeline)
-                        yield StepResultDTO.failed(step_num, str(e), [str(e)])
-                        if config.stop_on_error:
-                            for f in future_to_step:
-                                f.cancel()
-                            return
-            finally:
-                # Явное завершение работы executor'а
-                executor.shutdown(wait=False, cancel_futures=True)
+                    except Exception as fail_err:
+                        logger.error(f"Could not mark step {step_num} as failed: {fail_err}")
+                    yield StepResultDTO.failed(step_num, str(e), [str(e)])
+                    if config.stop_on_error:
+                        for f in future_to_step:
+                            f.cancel()
+                        return
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def execute(
             self, config: PipelineConfigDTO, pipeline_id: Optional[UUID] = None
@@ -180,6 +184,7 @@ class PipelineOrchestrator:
             if not pipeline:
                 raise ValueError(f"Pipeline with ID {pipeline_id} not found")
             pipeline.resume()
+            self._save_pipeline(pipeline)
         else:
             pipeline = self.create_pipeline(config.source_path, config.output_path)
             self._save_pipeline(pipeline)
@@ -193,10 +198,11 @@ class PipelineOrchestrator:
             step_numbers = self._registry.get_step_numbers()
 
         # Добавление шагов в агрегат, если их там нет
+        available_step_numbers = self._registry.get_step_numbers()
         existing_step_numbers = {s.sequence_number for s in pipeline.steps}
         for step_num in step_numbers:
             if step_num not in existing_step_numbers:
-                if step_num in self._registry.get_step_numbers():
+                if step_num in available_step_numbers:
                     step_instance = self._registry.get(step_num)
                     step_entity = PipelineStep(
                         sequence_number=step_num,

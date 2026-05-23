@@ -1,3 +1,6 @@
+# src/infrastructure/persistence/pipeline_serializer.py
+from __future__ import annotations
+
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -47,21 +50,23 @@ class JsonPipelineSerializer(PipelineSerializer):
 
     def deserialize(self, raw: str) -> PipelineAggregate:
         data = json.loads(raw)
-        steps = [
-            PipelineStep(
+        steps = []
+        for step_data in data.get("steps", []):
+            config_data = step_data.get("config") or {}
+            step = PipelineStep(
                 id=UUID(step_data["id"]),
                 sequence_number=step_data["sequence_number"],
                 name=step_data["name"],
                 status=StepStatus(step_data["status"]),
-                config=StepConfig(params=step_data["config"].get("params", {})),
+                config=StepConfig(params=config_data.get("params", {})),
                 started_at=datetime.fromisoformat(step_data["started_at"]) if step_data.get("started_at") else None,
                 completed_at=datetime.fromisoformat(step_data["completed_at"]) if step_data.get("completed_at") else None,
                 error=step_data.get("error"),
                 created_at=datetime.fromisoformat(step_data["created_at"]),
                 updated_at=datetime.fromisoformat(step_data["updated_at"]),
             )
-            for step_data in data.get("steps", [])
-        ]
+            steps.append(step)
+
         return PipelineAggregate(
             name=data["name"],
             id=UUID(data["id"]),

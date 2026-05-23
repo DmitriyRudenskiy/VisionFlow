@@ -1,5 +1,8 @@
+# src/application/pipeline/steps/pose_extraction_step.py
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from src.application.pipeline.steps.batch_file_step import BatchFileProcessingStep
 from src.application.ports import StoragePort, PoseExtractionPort
@@ -9,9 +12,18 @@ from src.domain.metadata.value_objects import PoseKeypoint
 
 
 class PoseExtractionStep(BatchFileProcessingStep):
-    def __init__(self, storage: StoragePort, extractor: PoseExtractionPort):
+    def __init__(self, storage: StoragePort, extractor: Optional[PoseExtractionPort] = None):
         super().__init__(storage)
-        self._extractor = extractor
+        self._extractor_factory = extractor
+        self._extractor: Optional[PoseExtractionPort] = None
+
+    def prepare(self) -> None:
+        if self._extractor is None:
+            if self._extractor_factory is not None:
+                self._extractor = self._extractor_factory
+            else:
+                from src.infrastructure.ai.dwpose_client import DWPoseClient
+                self._extractor = DWPoseClient()
 
     @property
     def output_subdirectory(self) -> str:
@@ -22,6 +34,9 @@ class PoseExtractionStep(BatchFileProcessingStep):
         return "_pose.json"
 
     def process_file(self, file_path: Path) -> Dict[str, Any]:
+        if self._extractor is None:
+            raise RuntimeError("prepare() was not called before execute()")
+
         raw_kp = self._extractor.extract_keypoints(file_path)
         pose_data = PoseData(
             file_path=FilePath(path=file_path),

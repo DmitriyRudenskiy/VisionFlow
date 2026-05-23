@@ -1,8 +1,10 @@
 # src/application/pipeline/steps/batch_file_step.py
+from __future__ import annotations
+
 import logging
 from abc import abstractmethod
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
@@ -39,6 +41,8 @@ class BatchFileProcessingStep(BaseStep):
         all_files = self._storage.scan_directory(source_path, recursive=False)
         processed_count = 0
         skipped_count = 0
+        error_count = 0
+        error_details: List[str] = []  # ← Расшифровка ошибок
 
         for file_path in all_files:
             if not file_path.is_file():
@@ -48,7 +52,7 @@ class BatchFileProcessingStep(BaseStep):
 
             # Идемпотентность: пропуск, если файл уже существует
             if self._storage.path_exists(out_json):
-                processed_count += 1
+                skipped_count += 1
                 continue
 
             try:
@@ -59,14 +63,31 @@ class BatchFileProcessingStep(BaseStep):
                 self._storage.persist_json(out_json, data)
                 processed_count += 1
             except Exception as e:
+                error_msg = f"{file_path.name}: {type(e).__name__}: {e}"
                 logger.warning(
                     f"Failed to process {file_path.name} in {self.__class__.__name__}: {e}"
                 )
-                skipped_count += 1
+                error_details.append(error_msg)
+                error_count += 1
+
+        total = processed_count + skipped_count + error_count
+
+        # Формируем читаемое сообщение
+        parts = [f"Processed {processed_count}/{total} files"]
+        if skipped_count:
+            parts.append(f"skipped {skipped_count}")
+        if error_count:
+            parts.append(f"errors {error_count}")
+            # Добавляем детали ошибок в message для видимости в CLI
+            details = "; ".join(error_details[:3])  # Первые 3 ошибки
+            if len(error_details) > 3:
+                details += f" (+{len(error_details) - 3} more)"
+            parts.append(f"[{details}]")
 
         return StepResultDTO.completed(
             sequence_number=config.sequence_number,
-            message=f"Processed {processed_count} files. Skipped {skipped_count}.",
+            message=".".join(parts) + ".",
             processed_count=processed_count,
-            skipped_count=skipped_count,
+            skipped_count=skipped_count + error_count,
+            errors=error_details if error_details else None,
         )

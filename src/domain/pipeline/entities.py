@@ -1,3 +1,6 @@
+# src/domain/pipeline/entities.py
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +55,7 @@ class PipelineStep:
             )
         self.status = StepStatus.COMPLETED
         self.completed_at = datetime.now(timezone.utc)
+        self.error = None  # Сбрасываем ошибку при успешном завершении
         self.update_modified_timestamp()
 
     def fail(self, error: str) -> None:

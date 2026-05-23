@@ -1,4 +1,6 @@
-# domain/image/value_objects.py
+# src/domain/image/value_objects.py
+from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -8,9 +10,8 @@ from src.shared.base import BaseValueObject
 from src.domain.image.exceptions import InvalidImageFormat
 
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
-    {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"}
+    {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".avif"}
 )
-
 
 @dataclass(frozen=True)
 class FilePath(BaseValueObject):

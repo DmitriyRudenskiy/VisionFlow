@@ -1,4 +1,6 @@
 # src/cli.py
+from __future__ import annotations
+
 import argparse
 import logging
 import sys
@@ -15,14 +17,6 @@ from src.application.pipeline.dto import PipelineConfigDTO
 from src.infrastructure.file_system import FileSystemStorage
 from src.infrastructure.persistence.pipeline_repository import JsonPipelineRepository
 from src.infrastructure.persistence.pipeline_serializer import JsonPipelineSerializer
-
-# AI Clients
-from src.infrastructure.ai.vit_client import VisionTransformerClient
-from src.infrastructure.ai.sam3_client import SAM3Client
-from src.infrastructure.ai.qwen_client import QwenVLClient
-from src.infrastructure.ai.dwpose_client import DWPoseClient
-from src.infrastructure.ai.nsfw_client import NSFWClient
-from src.infrastructure.ai.color_client import ColorExtractorClient
 
 # Steps
 from src.application.pipeline.steps.flatten_directories_step import FlattenDirectoriesStep
@@ -49,32 +43,32 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 def build_container() -> PipelineOrchestrator:
-    """Собирает все зависимости и регистрирует шаги пайплайна."""
+    """Собирает все зависимости и регистрирует шаги пайплайна.
+
+    AI-клиенты передаются как None — они инициализируются лениво
+    в prepare() только при выполнении соответствующего шага.
+    """
     repo = JsonPipelineRepository(
         storage_dir=Path("./data/pipelines"),
         serializer=JsonPipelineSerializer(),
     )
     fs_service = FileSystemStorage()
 
-    logger.info("Initializing AI Clients...")
-    # Инициализация реальных или заглушек AI-клиентов
-    visual_detector = VisionTransformerClient()
-    ai_segmenter = SAM3Client()
-    vectorizer = QwenVLClient()
-    pose_extractor = DWPoseClient()
-    nsfw_classifier = NSFWClient()
-    color_extractor = ColorExtractorClient()
+    logger.info("Initializing pipeline registry (AI models loaded lazily)...")
 
     registry = StepRegistry()
+    # Шаги 0-3: не требуют AI-моделей
     registry.register(0, FlattenDirectoriesStep(fs_service))
     registry.register(1, PrepareImagesStep(fs_service))
     registry.register(2, ExactDeduplicationStep(fs_service))
-    registry.register(3, VisualDeduplicationStep(fs_service, visual_detector))
-    registry.register(4, SmartCropStep(fs_service, ai_segmenter))
-    registry.register(5, EmbeddingExtractionStep(fs_service, vectorizer))
-    registry.register(6, PoseExtractionStep(fs_service, pose_extractor))
-    registry.register(7, ColorPaletteExtractionStep(fs_service, color_extractor))
-    registry.register(8, ContentSafetyClassificationStep(fs_service, nsfw_classifier))
+    registry.register(3, VisualDeduplicationStep(fs_service, detector=None))  # lazy
+
+    # Шаги 4-8: AI-клиенты = None → создадутся в prepare()
+    registry.register(4, SmartCropStep(fs_service, segmenter=None))  # lazy SAM3
+    registry.register(5, EmbeddingExtractionStep(fs_service, extractor=None))  # lazy Qwen-VL
+    registry.register(6, PoseExtractionStep(fs_service, extractor=None))  # lazy DWPose
+    registry.register(7, ColorPaletteExtractionStep(fs_service, extractor=None))  # lazy ColorExtractor
+    registry.register(8, ContentSafetyClassificationStep(fs_service, classifier=None))  # lazy NSFW
 
     return PipelineOrchestrator(registry, repo)
 
@@ -155,7 +149,6 @@ def main() -> None:
         logger.exception("Critical unhandled error during pipeline execution.")
         sys.exit(1)
 
-
 def _print_summary(results: List) -> None:
     logger.info("\n" + "=" * 50)
     logger.info("PIPELINE EXECUTION SUMMARY")
@@ -183,6 +176,10 @@ def _print_summary(results: List) -> None:
                     logger.error(f"   └── Error: {err}")
         else:
             logger.info(msg)
+            # Показываем ошибки даже для COMPLETED (если были частичные сбои)
+            if res.errors:
+                for err in res.errors:
+                    logger.warning(f"   └── Warning: {err}")
 
     logger.info("-" * 50)
     logger.info(f"Total: {success} succeeded, {skip} skipped, {fail} failed.")

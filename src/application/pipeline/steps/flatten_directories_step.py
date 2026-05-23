@@ -1,3 +1,6 @@
+# src/application/pipeline/steps/flatten_directories_step.py
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 from src.application.pipeline.steps.base_step import BaseStep

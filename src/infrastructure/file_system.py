@@ -1,3 +1,6 @@
+# src/infrastructure/file_system.py
+from __future__ import annotations
+
 import hashlib
 import json
 import shutil
@@ -7,12 +10,23 @@ from typing import Any, List
 from src.application.ports import StoragePort
 
 
+# Расширения, которые считаем изображениями
+IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".avif"}
+)
+
+
 class FileSystemStorage(StoragePort):
     def scan_directory(self, path: Path, recursive: bool = True) -> List[Path]:
         if not path.is_dir():
             return []
         pattern = "**/*" if recursive else "*"
-        return [p for p in path.glob(pattern) if p.is_file()]
+        all_files = [p for p in path.glob(pattern) if p.is_file()]
+        # Фильтруем только изображения
+        return sorted([
+            p for p in all_files
+            if p.suffix.lower() in IMAGE_EXTENSIONS
+        ])
 
     def move_file(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)

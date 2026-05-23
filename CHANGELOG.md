@@ -1,5 +1,42 @@
 ## CHANGELOG
 
+## [K2.6 Thinking]
+
+### Added
+- Реальные реализации AI-клиентов вместо заглушек:
+  - `DWPoseClient` — интеграция с `DwposeDetector`, паддинг изображений до 1024×1024
+  - `QwenVLClient` — загрузка `Qwen/Qwen3-VL-Embedding-2B` через `transformers`
+  - `SAM3Client` — сегментация `SAM3SemanticPredictor` с fallback-пrompts, поддержка режимов `square`/`mask`/`transparent`
+  - `VisionTransformerClient` — perceptual hash + pixel-based similarity
+  - `ColorExtractorClient` — извлечение палитры через `sklearn.cluster.KMeans` с ужиманием до 500k пикселей
+  - `NSFWClient` — классификация через HF `nsfw_image_detection` pipeline
+- Ленивая инициализация AI-клиентов через `BaseStep.prepare()` — модели загружаются только при выполнении соответствующего шага
+- Изолированный интеграционный тест `test_color_palette_extraction.py` с 5 эталонными изображениями
+- Фильтрация `scan_directory()` по `SUPPORTED_EXTENSIONS` — игнорирование `.DS_Store` и не-изображений
+- Graceful fallback в `JsonPipelineSerializer` при отсутствии ключа `config`
+- Реальные импорты в `scripts/verify_imports.py` вместо `pass`
+
+### Changed
+- `domain/pipeline/entities.py` — `PipelineStep.complete()` сбрасывает `error = None` для корректного `resume()`
+- `application/pipeline/orchestrator.py` — `Lock` заменён на `RLock`, атомарное обновление статуса + сохранение агрегата
+- `infrastructure/file_system.py` — `scan_directory()` возвращает `sorted()` список для детерминированности
+- `color_palette_extraction_step.py` — дефолт `num_colors` изменён с 5 на 20, суффикс выходного файла `.json` вместо `_colors.json`
+- `batch_file_step.py` — разделены счётчики `processed`/`skipped`/`error`, добавлена детальная расшифровка ошибок в `message`
+- `prepare_images_step.py` — независимый счётчик `rename_counter` для генерации имён файлов
+- Все step-файлы и `cli.py` — добавлен `from __future__ import annotations`
+
+### Fixed
+- Race condition при параллельном обновлении статуса пайплайна в `_process_step_result()`
+- Двойное управление жизненным циклом `ThreadPoolExecutor` (конфликт `with` и `finally`)
+- Недетерминированность порядка обхода файлов в `ExactDeduplicationStep` и `VisualDeduplicationStep`
+- Сброс ошибки после `resume()` — тест `test_resume_resets_running_steps` проходит корректно
+- 12+ ошибок mypy: дубли методов, `import-untyped`, `var-annotated`, `call-overload`, deleted variables
+
+### Infrastructure
+- Удалены дублирующиеся классы тестов в `test_pipeline_steps.py`
+- Добавлены `# type: ignore` для опциональных ML-зависимостей (`dwpose`, `ultralytics`, `sklearn`)
+- Глобальные переменные `_dwpose_import_error`, `_sam3_import_error` для корректной работы `mypy`
+
 ## [GLM-5] - Refactoring & Bugfixes
 
 ### Fixed (Исправлено)

@@ -1,3 +1,4 @@
+# src/application/pipeline/dto.py
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
@@ -30,7 +31,7 @@ class StepResultDTO:
     message: str = ""
     processed_count: int = 0
     skipped_count: int = 0
-    errors: List[str] = field(default_factory=list)
+    errors: Optional[List[str]] = field(default=None)
 
     @classmethod
     def completed(
@@ -39,6 +40,7 @@ class StepResultDTO:
         message: str = "",
         processed_count: int = 0,
         skipped_count: int = 0,
+        errors: Optional[List[str]] = None,
     ) -> "StepResultDTO":
         return cls(
             sequence_number=sequence_number,
@@ -46,6 +48,7 @@ class StepResultDTO:
             message=message,
             processed_count=processed_count,
             skipped_count=skipped_count,
+            errors=errors,
         )
 
     @classmethod

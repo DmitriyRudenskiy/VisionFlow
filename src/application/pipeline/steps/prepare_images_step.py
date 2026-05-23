@@ -1,3 +1,6 @@
+# src/application/pipeline/steps/prepare_images_step.py
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -21,6 +24,7 @@ class PrepareImagesStep(BaseStep):
         all_files = self._storage.scan_directory(source_path, recursive=False)
         processed_count = 0
         skipped_count = 0
+        rename_counter = 0
 
         for file_path in all_files:
             if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
@@ -39,7 +43,7 @@ class PrepareImagesStep(BaseStep):
             try:
                 mtime = self._storage.get_file_modified_time(file_path)
                 timestamp_str = datetime.fromtimestamp(mtime).strftime("%Y%m%d_%H%M%S")
-                new_stem = f"{timestamp_str}_{processed_count}"
+                new_stem = f"{timestamp_str}_{rename_counter}"
                 new_name = f"{new_stem}{file_path.suffix}"
                 dest_path = source_path / new_name
 
@@ -51,6 +55,7 @@ class PrepareImagesStep(BaseStep):
 
                 self._storage.move_file(file_path, dest_path)
                 processed_count += 1
+                rename_counter += 1
             except OSError as e:
                 logger.warning(f"Failed to rename {file_path.name}: {e}")
                 skipped_count += 1

@@ -1,7 +1,7 @@
+# tests/test_pipeline_steps.py
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
-
 
 from src.application.pipeline.dto import StepConfigDTO
 from src.application.pipeline.steps.flatten_directories_step import FlattenDirectoriesStep
@@ -127,7 +127,7 @@ class TestVisualDeduplicationStep:
         detector = MagicMock()
         detector.calculate_phash.side_effect = ["hash_a", "hash_b"]
 
-        step = VisualDeduplicationStep(file_storage, detector)
+        step = VisualDeduplicationStep(file_storage, detector=detector)
         config = make_step_config(3, src)
         result = step.execute(config)
 
@@ -147,7 +147,7 @@ class TestVisualDeduplicationStep:
         detector = MagicMock()
         detector.calculate_phash.return_value = "same_hash"
 
-        step = VisualDeduplicationStep(file_storage, detector)
+        step = VisualDeduplicationStep(file_storage, detector=detector)
         config = make_step_config(3, src)
         result = step.execute(config)
 
@@ -166,7 +166,7 @@ class TestSmartCropStep:
         segmenter = MagicMock()
         segmenter.crop_image.return_value = src / "pic.jpg"
 
-        step = SmartCropStep(file_storage, segmenter)
+        step = SmartCropStep(file_storage, segmenter=segmenter)
         config = make_step_config(4, src)
         result = step.execute(config)
 
@@ -186,7 +186,7 @@ class TestSmartCropStep:
         segmenter = MagicMock()
         segmenter.crop_image.return_value = temp_crop
 
-        step = SmartCropStep(file_storage, segmenter)
+        step = SmartCropStep(file_storage, segmenter=segmenter)
         config = make_step_config(4, src)
         result = step.execute(config)
 
@@ -205,7 +205,7 @@ class TestEmbeddingExtractionStep:
         vectorizer = MagicMock()
         vectorizer.get_embedding.return_value = [0.1] * 512
 
-        step = EmbeddingExtractionStep(file_storage, vectorizer)
+        step = EmbeddingExtractionStep(file_storage, extractor=vectorizer)
         config = make_step_config(5, src)
         result = step.execute(config)
 
@@ -231,7 +231,7 @@ class TestPoseExtractionStep:
             "face": [], "left_hand": [], "right_hand": []
         }
 
-        step = PoseExtractionStep(file_storage, pose_ext)
+        step = PoseExtractionStep(file_storage, extractor=pose_ext)
         config = make_step_config(6, src)
         result = step.execute(config)
 
@@ -255,14 +255,14 @@ class TestColorPaletteExtractionStep:
             {"rgb": [1, 2, 3], "hex": "#010203", "percentage": 50.0}
         ]
 
-        step = ColorPaletteExtractionStep(file_storage, color_ext)
+        step = ColorPaletteExtractionStep(file_storage, extractor=color_ext)
         config = make_step_config(7, src)
         result = step.execute(config)
 
         assert result.status == "COMPLETED"
         colors_dir = src / "_colors"
         assert colors_dir.is_dir()
-        json_files = list(colors_dir.glob("*_colors.json"))
+        json_files = list(colors_dir.glob("*.json"))
         assert len(json_files) == 1
         data = json.loads(json_files[0].read_text())
         assert "colors" in data
@@ -277,7 +277,7 @@ class TestContentSafetyClassificationStep:
         nsfw_clf = MagicMock()
         nsfw_clf.classify.return_value = (0.1, 0.9)
 
-        step = ContentSafetyClassificationStep(file_storage, nsfw_clf)
+        step = ContentSafetyClassificationStep(file_storage, classifier=nsfw_clf)
         config = make_step_config(8, src)
         result = step.execute(config)
 
