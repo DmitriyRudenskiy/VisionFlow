@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 from src.application.pipeline.dto import StepConfigDTO
 from src.application.pipeline.steps.flatten_directories_step import FlattenDirectoriesStep

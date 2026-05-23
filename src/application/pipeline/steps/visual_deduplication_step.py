@@ -1,60 +1,90 @@
-import logging
+from collections import defaultdict
 from pathlib import Path
+import logging
+import html
+
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
-from src.application.ports import StoragePort, ImageSegmentationPort
+from src.application.ports import StoragePort, VisualDuplicateDetectorPort
+from src.domain.image.value_objects import FilePath
+from src.domain.image.exceptions import InvalidImageFormat
+from src.domain.deduplication.value_objects import FileHash
+from src.domain.deduplication.entities import HashEntry, DuplicateGroup
 
 logger = logging.getLogger(__name__)
 
 
-class SmartCropStep(BaseStep):
-    def __init__(self, storage: StoragePort, segmenter: ImageSegmentationPort):
+class VisualDeduplicationStep(BaseStep):
+    def __init__(self, storage: StoragePort, detector: VisualDuplicateDetectorPort):
         self._storage = storage
-        self._segmenter = segmenter
+        self._detector = detector
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
         source_path = Path(config.params.get("source_path", "."))
-
-        mode = config.params.get("crop_mode", "square")
-        if mode not in ["square", "mask", "transparent"]:
-            raise ValueError(f"Unsupported crop mode: {mode}")
+        visual_dups_path = source_path / "_visual_duplicates"
+        self._storage.create_directory(visual_dups_path)
 
         all_files = self._storage.scan_directory(source_path, recursive=False)
-        cropped_count = 0
 
+        hash_map = defaultdict(list)
+        skipped_count = 0
         for file_path in all_files:
-            if not file_path.is_file():
+            try:
+                file_vo = FilePath(path=file_path)
+            except (InvalidImageFormat, ValueError) as e:
+                logger.warning(f"Skipping file {file_path.name}: {e}")
+                skipped_count += 1
+                continue
+            try:
+                phash = self._detector.calculate_phash(file_path)
+            except Exception:
+                logger.warning(
+                    f"Skipping file {file_path.name}, failed to calculate phash"
+                )
+                skipped_count += 1
+                continue
+            modified_at = self._storage.get_file_modified_time(file_path)
+            entry = HashEntry(
+                file_hash=FileHash(algorithm="phash", value=phash),
+                file_path=file_vo,
+                file_size=self._storage.get_file_size(file_path),
+                modified_at=modified_at,
+            )
+            hash_map[phash].append(entry)
+
+        groups_found = 0
+        html_items = []
+
+        for hash_value, entries in hash_map.items():
+            if len(entries) < 2:
                 continue
 
-            try:
-                cropped_image_path = self._segmenter.crop_image(file_path, mode=mode)
+            group = DuplicateGroup(group_id=f"phash_{hash_value}", entries=entries)
+            group.resolve_original_by_size()
 
-                if cropped_image_path and self._storage.path_exists(cropped_image_path):
-                    if cropped_image_path != file_path:
-                        dest_path = source_path / cropped_image_path.name
+            if group.original_entry:
+                groups_found += 1
+                orig_name = html.escape(group.original_entry.file_path.name)
+                html_items.append(
+                    f"<div><h3>Group {html.escape(group.group_id)}</h3><p>Original: {orig_name}</p></div>"
+                )
 
-                        if self._storage.path_exists(dest_path) and dest_path != file_path:
-                            stem = dest_path.stem
-                            suffix = dest_path.suffix
-                            counter = 1
-                            new_dest = dest_path
-                            while self._storage.path_exists(new_dest):
-                                new_dest = source_path / f"{stem}_{counter}{suffix}"
-                                counter += 1
-                            dest_path = new_dest
+                for dup in group.duplicates:
+                    dest_path = visual_dups_path / dup.file_path.name
+                    self._storage.move_file(dup.file_path.path, dest_path)
 
-                        self._storage.move_file(cropped_image_path, dest_path)
-
-                    cropped_count += 1
-                else:
-                    logger.warning(
-                        f"Segmenter returned non-existent path for {file_path.name}"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to crop {file_path.name}: {e}")
+        report_path = source_path / "visual_dups_report.html"
+        html_content = (
+            "<html><head><meta charset='utf-8'><title>Visual Duplicates Report</title></head>"
+            "<body><h1>Visual Duplicates Report</h1>"
+            f"<p>Total groups found: {groups_found}</p>"
+            f"{''.join(html_items)}</body></html>"
+        )
+        self._storage.persist_text(report_path, html_content)
 
         return StepResultDTO.completed(
             sequence_number=config.sequence_number,
-            message=f"Successfully cropped {cropped_count} images in '{mode}' mode.",
-            processed_count=cropped_count,
+            message=f"Found {groups_found} visual duplicate groups. Report saved. Skipped {skipped_count} files.",
+            processed_count=groups_found,
+            skipped_count=skipped_count,
         )
