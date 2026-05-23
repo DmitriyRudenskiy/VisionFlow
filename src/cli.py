@@ -121,9 +121,18 @@ Examples:
         logger.info("PIPELINE EXECUTION SUMMARY")
         logger.info("=" * 50)
         success_count = 0
+        skip_count = 0
         fail_count = 0
         for res in results:
-            icon = "✅" if res.status == "COMPLETED" else "❌"
+            if res.status == "COMPLETED":
+                icon = "✅"
+                success_count += 1
+            elif res.status == "SKIPPED":
+                icon = "⏭️"
+                skip_count += 1
+            else:
+                icon = "❌"
+                fail_count += 1
             msg = f"{icon} Step {res.step_number}: {res.status}"
             if res.message:
                 msg += f" | {res.message}"
@@ -132,16 +141,17 @@ Examples:
                 if res.errors:
                     for err in res.errors:
                         logger.error(f"   └── Error: {err}")
-                fail_count += 1
             else:
                 logger.info(msg)
-                success_count += 1
         logger.info("-" * 50)
-        logger.info(f"Total: {success_count} succeeded, {fail_count} failed.")
+        logger.info(f"Total: {success_count} succeeded, {skip_count} skipped, {fail_count} failed.")
         logger.info("=" * 50)
     except ValueError as e:
         logger.error(f"Configuration Error: {e}")
         sys.exit(1)
+    except KeyboardInterrupt:
+        logger.warning("\nExecution interrupted by user.")
+        sys.exit(130)
     except Exception as e:
         logger.exception("Critical unhandled error during pipeline execution.")
         sys.exit(1)

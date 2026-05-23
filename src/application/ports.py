@@ -1,6 +1,7 @@
+# application/ports.py
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import Optional
 from uuid import UUID
 
 from src.domain.pipeline.entities import PipelineAggregate
@@ -22,7 +23,7 @@ class FileSystemServicePort(ABC):
     """Порт для файловых операций"""
 
     @abstractmethod
-    def scan_directory(self, path: Path, recursive: bool = True) -> List[Path]: ...
+    def scan_directory(self, path: Path, recursive: bool = True) -> list[Path]: ...
 
     @abstractmethod
     def move_file(self, source: Path, destination: Path) -> None: ...
@@ -64,7 +65,7 @@ class VectorizationPort(ABC):
     """Порт для извлечения эмбеддингов (Qwen-VL)"""
 
     @abstractmethod
-    def get_embedding(self, image_path: Path) -> List[float]: ...
+    def get_embedding(self, image_path: Path) -> list[float]: ...
 
 
 class PoseExtractorPort(ABC):
@@ -78,16 +79,17 @@ class ColorExtractorPort(ABC):
     """Порт для извлечения палитры цветов"""
 
     @abstractmethod
-    def extract_palette(self, image_path: Path, num_colors: int = 5) -> List[dict]: ...
+    def extract_palette(self, image_path: Path, num_colors: int = 5) -> list[dict]: ...
 
 
 class NsfwClassifierPort(ABC):
     """Порт для классификации NSFW контента"""
 
     @abstractmethod
-    def classify(self, image_path: Path) -> Tuple[float, float]: ...
+    def classify(self, image_path: Path) -> tuple[float, float]: ...
 
 
+# --- Зарезервировано для будущего слоя персистентности доменных сущностей ---
 class ImageRepository(ABC):
     @abstractmethod
     def save(self, image: ImageFile) -> None: ...

@@ -1,4 +1,4 @@
-# src/domain/image/value_objects.py
+# domain/image/value_objects.py
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +7,7 @@ from typing import Optional
 from src.shared.base import BaseValueObject
 from src.domain.image.exceptions import InvalidImageFormat
 
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"}
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"})
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class FilePath(BaseValueObject):
         if self.path.suffix.lower() not in SUPPORTED_EXTENSIONS:
             raise InvalidImageFormat(
                 f"Unsupported file extension '{self.path.suffix}'. "
-                f"Supported: {', '.join(SUPPORTED_EXTENSIONS)}"
+                f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
             )
 
     @property

@@ -2,7 +2,6 @@
 import json
 import logging
 from pathlib import Path
-from typing import List
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
 from src.application.ports import FileSystemServicePort, VectorizationPort
@@ -23,11 +22,9 @@ class Step5Vectorize(BaseStep):
 
         all_files = self._fs.scan_directory(source_path, recursive=False)
         processed_count = 0
+        skipped_count = 0
 
         for file_path in all_files:
-            if not file_path.is_file():
-                continue
-
             out_json = vectors_path / f"{file_path.stem}_vector.json"
             if out_json.exists():
                 processed_count += 1
@@ -35,22 +32,31 @@ class Step5Vectorize(BaseStep):
 
             try:
                 raw_vector = self._vectorizer.get_embedding(file_path)
+                if not raw_vector:
+                    logger.warning(f"Empty embedding for {file_path.name}, skipping.")
+                    skipped_count += 1
+                    continue
+
                 embedding = VectorEmbedding(values=tuple(raw_vector), model_name="Qwen-VL")
                 normalized = embedding.l2_normalize()
 
-                with open(out_json, "w") as f:
+                with open(out_json, "w", encoding="utf-8") as f:
                     json.dump({
                         "file": file_path.name,
                         "model": normalized.model_name,
-                        "vector": list(normalized.values)
-                    }, f)
+                        "vector": list(normalized.values),
+                        "dimension": normalized.dimension
+                    }, f, ensure_ascii=False)
 
                 processed_count += 1
             except Exception as e:
                 logger.warning(f"Failed to vectorize {file_path.name}: {e}")
+                skipped_count += 1
 
         return StepResultDTO(
             step_number=config.step_number,
             status="COMPLETED",
-            message=f"Vectorized {processed_count} images."
+            message=f"Vectorized {processed_count} images. Skipped {skipped_count}.",
+            processed_count=processed_count,
+            skipped_count=skipped_count
         )

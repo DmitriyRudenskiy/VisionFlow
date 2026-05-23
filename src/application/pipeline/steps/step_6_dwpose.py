@@ -40,6 +40,7 @@ class Step6DWPose(BaseStep):
             out_json = poses_path / f"{file_path.stem}_pose.json"
 
             if out_json.exists():
+                processed_count += 1
                 continue
 
             try:
@@ -66,5 +67,6 @@ class Step6DWPose(BaseStep):
         return StepResultDTO(
             step_number=config.step_number,
             status="COMPLETED",
-            message=f"Extracted poses for {processed_count} images."
+            message=f"Extracted poses for {processed_count} images.",
+            processed_count=processed_count
         )

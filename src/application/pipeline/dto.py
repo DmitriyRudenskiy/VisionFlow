@@ -1,7 +1,7 @@
-# src/application/pipeline/dto.py
+# application/pipeline/dto.py
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 
 @dataclass
@@ -24,13 +24,11 @@ class StepConfigDTO:
 class StepResultDTO:
     """Результат выполнения шага."""
     step_number: int
-    status: str  # "COMPLETED", "FAILED", "SKIPPED"
+    status: Literal["COMPLETED", "FAILED", "SKIPPED"]
     message: str = ""
     processed_count: int = 0
     skipped_count: int = 0
     errors: List[str] = field(default_factory=list)
-
-    # Убрано автоматическое изменение статуса – теперь за это отвечает вызывающий код
 
 
 @dataclass

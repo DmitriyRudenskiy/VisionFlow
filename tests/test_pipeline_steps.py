@@ -56,12 +56,12 @@ class TestStep0Flatten:
 
         assert result.status == "COMPLETED"
         assert result.message.startswith("Flattened directory")
-        root_files = list(src.iterdir())
-        assert len([f for f in root_files if f.is_file()]) == 4
+        root_files = [f for f in src.iterdir() if f.is_file()]
+        assert len(root_files) == 4
         assert (src / "a.jpg").exists()
         assert (src / "b.png").exists()
         assert (src / "c.jpg").exists()
-        assert any(f.name.startswith("c_") for f in root_files if f.is_file())
+        assert any(f.name.startswith("c_") for f in root_files)
 
 
 class TestStep1Prepare:
@@ -84,18 +84,11 @@ class TestStep1Prepare:
         assert not (src / "_originals" / "readme.txt").exists()
 
         assert len(list((src / "_originals").iterdir())) == 2
-        renamed = [f for f in src.iterdir() if f.is_file()]
-        assert len(renamed) == 1  # only txt remains in root (images moved/renamed in place)
-        # Actually Step 1 renames in place. So files in root should be the renamed images.
-        # Let's re-verify logic: scan -> copy to backup -> rename in place.
-        # So root contains renamed images.
 
         root_files = [f for f in src.iterdir() if f.is_file()]
-        # We have 2 images. They should be renamed.
-        assert len(root_files) == 3  # 2 renamed images + 1 txt (ignored by rename logic if implemented correctly)
-        # If step 1 ignores non-images for renaming:
-        # Current logic renames everything if not filtered.
-        # Improved code filters non-images.
+        # 2 renamed images + 1 untouched txt
+        assert len(root_files) == 3
+        assert (src / "readme.txt").exists()
 
     def test_ignore_non_images(self, tmp_path):
         src = tmp_path / "source"
@@ -129,7 +122,10 @@ class TestStep2Deduplicate:
         assert dup_dir.is_dir()
         duplicates = list(dup_dir.iterdir())
         assert len(duplicates) == 1
-        assert (src / "orig.jpg").exists() or (src / "copy.jpg").exists()
+
+        # Exactly one of the duplicates should remain in root
+        remaining_dups = [f for f in src.iterdir() if f.is_file() and f.name in ("orig.jpg", "copy.jpg")]
+        assert len(remaining_dups) == 1
         assert (src / "unique.png").exists()
 
 
@@ -186,18 +182,16 @@ class TestStep4AICrop:
 
         # Mock segmenter to return the same path (in-place modification simulation)
         segmenter = MagicMock()
-        segmenter.crop_image.return_value = src / "pic.jpg"  # Simulating modification or temp file
+        segmenter.crop_image.return_value = src / "pic.jpg"
 
         step = Step4AICrop(FileSystemService(), segmenter)
         config = make_step_config(4, src)
         result = step.execute(config)
 
         assert result.status == "COMPLETED"
-        # Files should remain in root for the pipeline to continue
+        assert result.processed_count == 2  # Both files processed
         assert (src / "pic.jpg").exists()
-        # We expect the logic to handle file movement correctly
-        # If crop_image returns a temp path, we move it.
-        # If it returns the original path, we do nothing.
+        assert (src / "img.png").exists()
 
     def test_ai_crop_handles_temp_file(self, tmp_path):
         src = tmp_path / "source"
@@ -216,6 +210,7 @@ class TestStep4AICrop:
         result = step.execute(config)
 
         assert result.status == "COMPLETED"
+        assert result.processed_count == 1
         # Temp file should be moved to source
         assert not temp_crop.exists()
         assert (src / "temp_crop.jpg").exists()

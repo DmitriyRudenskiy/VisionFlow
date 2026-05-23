@@ -21,6 +21,13 @@ class FileSystemService(FileSystemServicePort):
 
     def move_file(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() and destination != source:
+            # Remove destination to avoid shutil.move errors on Windows
+            # or cross-device issues when destination exists
+            if destination.is_file():
+                destination.unlink(missing_ok=True)
+            else:
+                shutil.rmtree(destination, ignore_errors=True)
         shutil.move(str(source), str(destination))
 
     def copy_file(self, source: Path, destination: Path) -> None:

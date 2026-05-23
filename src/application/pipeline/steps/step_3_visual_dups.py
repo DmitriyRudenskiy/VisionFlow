@@ -25,19 +25,22 @@ class Step3VisualDups(BaseStep):
         visual_dups_path = source_path / "_visual_duplicates"
         self._fs.create_directory(visual_dups_path)
 
-        all_files = [f for f in self._fs.scan_directory(source_path, recursive=False) if f.is_file()]
+        all_files = self._fs.scan_directory(source_path, recursive=False)
 
         hash_map = defaultdict(list)
+        skipped_count = 0
         for file_path in all_files:
             try:
                 file_vo = FilePath(path=file_path)
             except (InvalidImageFormat, ValueError) as e:
                 logger.warning(f"Skipping file {file_path.name}: {e}")
+                skipped_count += 1
                 continue
             try:
                 phash = self._detector.calculate_phash(file_path)
             except Exception:
                 logger.warning(f"Skipping file {file_path.name}, failed to calculate phash")
+                skipped_count += 1
                 continue
             modified_at = self._fs.get_file_modified_time(file_path)
             entry = HashEntry(
@@ -70,12 +73,17 @@ class Step3VisualDups(BaseStep):
                     self._fs.move_file(dup.file_path.path, dest_path)
 
         report_path = source_path / "visual_dups_report.html"
-        html_content = f"<html><body><h1>Visual Duplicates Report</h1>{''.join(html_items)}</body></html>"
+        html_content = (
+            "<html><head><meta charset='utf-8'><title>Visual Duplicates Report</title></head>"
+            "<body><h1>Visual Duplicates Report</h1>"
+            f"<p>Total groups found: {groups_found}</p>"
+            f"{''.join(html_items)}</body></html>"
+        )
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(html_content)
 
         return StepResultDTO(
             step_number=config.step_number,
             status="COMPLETED",
-            message=f"Found {groups_found} visual duplicate groups. Report saved."
+            message=f"Found {groups_found} visual duplicate groups. Report saved. Skipped {skipped_count} files."
         )

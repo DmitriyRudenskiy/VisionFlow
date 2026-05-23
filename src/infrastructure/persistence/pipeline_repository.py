@@ -52,14 +52,14 @@ class PipelineMapper:
             ) for step_data in data.get("steps", [])
         ]
         return PipelineAggregate(
-            id=UUID(data["id"]),
             name=data["name"],
+            id=UUID(data["id"]),
+            created_at=datetime.fromisoformat(data["created_at"]),
+            updated_at=datetime.fromisoformat(data["updated_at"]),
             status=PipelineStatus(data["status"]),
             steps=steps,
             source_path=Path(data["source_path"]),
             output_path=Path(data["output_path"]),
-            created_at=datetime.fromisoformat(data["created_at"]),
-            updated_at=datetime.fromisoformat(data["updated_at"])
         )
 
 class JsonPipelineRepository(PipelineRepository):

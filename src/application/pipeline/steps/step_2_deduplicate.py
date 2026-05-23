@@ -28,15 +28,12 @@ class Step2Deduplicate(BaseStep):
         skipped_count = 0
 
         for file_path in all_files:
-            if file_path.is_dir() or file_path.parent == duplicates_path:
-                continue
-
             try:
                 file_vo = FilePath(path=file_path)
 
                 hash_value = self._fs.get_file_hash(file_path, algorithm="md5")
                 file_size = self._fs.get_file_size(file_path)
-                modified_at = self._fs.get_file_modified_time(file_path)  # получаем время модификации
+                modified_at = self._fs.get_file_modified_time(file_path)
 
                 entry = HashEntry(
                     file_hash=FileHash(algorithm="md5", value=hash_value),

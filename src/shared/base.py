@@ -1,7 +1,9 @@
+# shared/base.py
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from typing import Any
+
 
 @dataclass
 class BaseEntity:
@@ -21,8 +23,15 @@ class BaseEntity:
     def __hash__(self) -> int:
         return hash(self.id)
 
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} id={self.id}>"
+
+
 @dataclass(frozen=True)
 class BaseValueObject:
     """Базовый класс для объектов-значений (Value Objects).
     Immutable (frozen=True). Сравнение происходит автоматически по всем полям."""
-    pass
+
+    def __repr__(self) -> str:
+        fields = ", ".join(f"{k}={v!r}" for k, v in self.__dict__.items())
+        return f"{self.__class__.__name__}({fields})"

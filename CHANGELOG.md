@@ -1,5 +1,62 @@
 ## CHANGELOG
 
+## [K2.6 Thinking]
+
+### Исправлено (Fixed)
+
+- **Orchestrator** — `config.steps_to_run or ...` при пустом списке `[]` запускал **все** шаги вместо выбранных. Теперь используется явная проверка `is None`.
+- **Orchestrator** — при `resume()` зависшие шаги в статусе `RUNNING` (например, после `kill -9`) не сбрасывались, что приводило к исключению `InvalidStepStateTransition` при попытке их перезапуска.
+- **Orchestrator** — добавлена защита от ошибки в `start_step()` при возобновлении пайплайна: ошибка старта теперь корректно обрабатывается и yield'ится как `FAILED`, не прерывая цикл `execute()`.
+- **Step 2 (Deduplicate)** — убран избыточный («мёртвый») код: проверки `is_dir()` и `parent == duplicates_path` при нерекурсивном сканировании файловой системы.
+- **Step 3 (Visual Dups)** — убран избыточный фильтр `if f.is_file()` (порт `scan_directory` гарантирует возврат только файлов).
+- **Step 4 (AI Crop)** — `cropped_count` **не инкрементировался**, если сегментер работал in-place (`cropped_image_path == file_path`).
+- **Step 4 (AI Crop)** — незавершённая логика обработки коллизий имён файлов (`pass` вместо генерации уникального имени).
+- **Steps 6/7/8 (DWPose, Colors, NSFW)** — при существующем JSON-файле шаг пропускал файл, но **не увеличивал** `processed_count`, что приводило к некорректной статистике (в отличие от Step 5).
+- **FileSystemService** — `shutil.move` на Windows падал с ошибкой, если destination уже существовал. Добавлено предварительное удаление существующего destination.
+- **PipelineRepository** — порядок именованных аргументов в `from_dict()` расходился с порядком полей `dataclass`, что усложняло рефакторинг.
+- **Tests** — в `TestStep1Prepare` присутствовали противоречивые ассерты (`assert len == 1` и `assert len == 3` одновременно).
+- **Tests** — в `TestStep2Deduplicate` проверка оставшегося в корне дубликата была нестабильной (не гарантировала, какой именно файл останется).
+
+### Добавлено (Added)
+
+- **Orchestrator** — **параллельное выполнение** шагов 5–8 (Vectorize, DWPose, Colors, NSFW) через `ThreadPoolExecutor`. State-transition (`start/complete/fail`) выполняется в главном потоке, тяжёлый `execute` — в пуле тредов.
+- **Orchestrator** — `threading.Lock` (`_save_lock`) для thread-safe сохранения агрегата пайплайна в `JsonPipelineRepository`.
+- **Orchestrator** — `yield` статуса `SKIPPED` для уже выполненных (`COMPLETED`) шагов при повторном запуске.
+- **Step 0 (Flatten)** — защита от попытки переместить файл самого на себя (уже находящийся в корне). Добавлена обработка `OSError` при move.
+- **Step 1 (Prepare)** — явный `skipped_count` и обработка ошибок при backup/copy и rename/move.
+- **Step 3 (Visual Dups)** — добавлен счётчик `skipped_count` для файлов, которые не удалось обработать.
+- **Step 5 (Vectorize)** — защита от пустого (`None` / пустой список) embedding, возвращаемого векторизатором.
+- **Step 5 (Vectorize)** — `ensure_ascii=False` при записи JSON для корректной сериализации Unicode.
+- **Domain (metadata/value_objects)** — строгая валидация `ColorEntry`: RGB-диапазон `0..255`, `percentage` `0..100`, корректный hex-формат (`#RRGGBB`).
+- **Domain (metadata/value_objects)** — валидация `NsfwScore`: сумма `nsfw_value + safe_value` должна быть приблизительно равна `1.0` (допуск `±0.01`).
+- **Domain (image/value_objects)** — `SUPPORTED_EXTENSIONS` переведён в `frozenset[str]` для иммутабельности и O(1) lookup.
+- **Shared (base)** — добавлен `__repr__` для `BaseEntity` и `BaseValueObject` для удобной отладки в логах и консоли.
+- **Application (ports)** — аннотации типов обновлены до современного синтаксиса (`list[Path]`, `tuple[float, float]`, `|` вместо `Optional`).
+- **Application (dto)** — тип статуса `StepResultDTO.status` изменён на `Literal["COMPLETED", "FAILED", "SKIPPED"]` вместо сырой строки.
+- **CLI** — добавлена обработка `KeyboardInterrupt` (код выхода `130`).
+- **CLI** — логика summary теперь корректно отображает `SKIPPED`-шаги (⏭️) и считает их отдельно.
+- **Tests** — новый модуль `tests/test_pipeline_resume.py` с интеграционными тестами:
+  - Восстановление после аварийного прерывания (`kill -9`) и сброс зависших `RUNNING`-шагов.
+  - Повторный запуск с пропуском уже выполненных (`COMPLETED`) шагов.
+  - Параллельное выполнение группы шагов 5–8 с проверкой финальных статусов.
+  - Обработка `stop_on_error=True` внутри параллельной группы.
+
+### Изменено (Changed)
+
+- **Orchestrator** — монолитный метод `execute()` декомпозирован на `_run_single_step()` и `_execute_parallel_group()` для разделения ответственности.
+- **Step 4 (AI Crop)** — при коллизии имён при перемещении temp-файла в source теперь генерируется уникальное имя (`{stem}_{counter}{suffix}`), вместо незавершённой логики.
+- **FileSystemService** — `move_file()` теперь предварительно удаляет существующий destination (файл или директорию) перед вызовом `shutil.move()`.
+- **PipelineRepository** — порядок аргументов в `PipelineMapper.from_dict()` приведён к порядку объявления полей в `PipelineAggregate`.
+
+### Улучшено (Improved)
+
+- **Step 0 (Flatten)** — добавлены явные счётчики `processed_count` и `skipped_count` в `StepResultDTO`.
+- **Step 1 (Prepare)** — корректная работа при повторном запуске (idempotent backup/rename).
+- **Step 5 (Vectorize)** — убрана избыточная проверка `if not file_path.is_file()` (порт гарантирует файлы).
+- **Steps 6/7/8** — поведение `processed_count` унифицировано с Step 5: пропуск существующего JSON засчитывается как обработанный.
+- **Tests** — в `TestStep4AICrop` добавлена проверка `processed_count` для in-place и temp-file сценариев.
+- **Step 3 (Visual Dups)** — HTML-отчёт теперь содержит `&lt;meta charset='utf-8'&gt;` и счётчик найденных групп.
+
 ## [GLM-5] - 2024-05-21
 
 ### Fixed

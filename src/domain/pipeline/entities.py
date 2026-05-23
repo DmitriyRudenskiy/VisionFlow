@@ -99,9 +99,16 @@ class PipelineAggregate:
         raise StepNotFoundError(f"Step with number {step_number} not found")
 
     def resume(self) -> None:
-        """Позволяет продолжить выполнение после FAILED."""
+        """Позволяет продолжить выполнение после FAILED или аварийного прерывания."""
         if self.status == PipelineStatus.FAILED:
             self.status = PipelineStatus.PENDING
+        # Сброс зависших шагов (например, после аварийного завершения процесса)
+        for step in self.steps:
+            if step.status == StepStatus.RUNNING:
+                step.status = StepStatus.FAILED
+                step.error = "Pipeline was interrupted during execution"
+                step.completed_at = datetime.now(timezone.utc)
+                step.touch()
         self.touch()
 
     def start_step(self, step_number: int) -> None:
