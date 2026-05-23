@@ -37,7 +37,7 @@ class PipelineOrchestrator:
             self._repo.save(pipeline)
 
     def _run_single_step(
-        self, pipeline: PipelineAggregate, step_num: int, config: PipelineConfigDTO
+            self, pipeline: PipelineAggregate, step_num: int, config: PipelineConfigDTO
     ) -> StepResultDTO:
         step_instance = self._registry.get(step_num)
         step_config = StepConfigDTO(
@@ -87,10 +87,10 @@ class PipelineOrchestrator:
             )
 
     def _execute_parallel_group(
-        self,
-        pipeline: PipelineAggregate,
-        group_steps: List[int],
-        config: PipelineConfigDTO,
+            self,
+            pipeline: PipelineAggregate,
+            group_steps: List[int],
+            config: PipelineConfigDTO,
     ) -> Generator[StepResultDTO, None, None]:
         pending_steps: List[int] = []
         for step_num in group_steps:
@@ -123,7 +123,7 @@ class PipelineOrchestrator:
             return
 
         with ThreadPoolExecutor(
-            max_workers=len(pending_steps), thread_name_prefix="parallel_step"
+                max_workers=len(pending_steps), thread_name_prefix="parallel_step"
         ) as executor:
             future_to_step = {}
             for step_num in pending_steps:
@@ -178,7 +178,7 @@ class PipelineOrchestrator:
                         return
 
     def execute(
-        self, config: PipelineConfigDTO, pipeline_id: Optional[UUID] = None
+            self, config: PipelineConfigDTO, pipeline_id: Optional[UUID] = None
     ) -> Generator[StepResultDTO, None, None]:
         # --- Определяем pipeline и список шагов ---
         if pipeline_id:
@@ -186,34 +186,43 @@ class PipelineOrchestrator:
             if not pipeline:
                 raise ValueError(f"Pipeline with ID {pipeline_id} not found")
             pipeline.resume()
-            # Работаем только с шагами, которые уже есть в пайплайне
-            existing_step_numbers = {s.step_number for s in pipeline.steps}
-            if config.steps_to_run is not None:
-                step_numbers = sorted(
-                    [n for n in config.steps_to_run if n in existing_step_numbers]
-                )
-            else:
-                step_numbers = sorted(existing_step_numbers)
         else:
             pipeline = self.create_pipeline(config.source_path, config.output_path)
             self._save_pipeline(pipeline)
-            # Новый пайплайн: добавляем нужные шаги
-            step_numbers = (
-                self._registry.get_step_numbers()
-                if config.steps_to_run is None
-                else sorted(config.steps_to_run)
-            )
-            for step_num in step_numbers:
-                step_instance = self._registry.get(step_num)
-                step_entity = PipelineStep(
-                    step_number=step_num, step_name=step_instance.__class__.__name__
-                )
-                pipeline.add_step(step_entity)
-            self._save_pipeline(pipeline)
+
+        # Определяем целевые номера шагов
+        if config.steps_to_run is not None:
+            step_numbers = sorted(config.steps_to_run)
+        elif pipeline_id:
+            # Если resume и шаги не указаны явно, берем существующие
+            step_numbers = sorted([s.step_number for s in pipeline.steps])
+        else:
+            # Если новый пайплайн и шаги не указаны, берем все из реестра
+            step_numbers = self._registry.get_step_numbers()
+
+        # Синхронизируем шаги в агрегате с целевыми
+        existing_step_numbers = {s.step_number for s in pipeline.steps}
+        for step_num in step_numbers:
+            if step_num not in existing_step_numbers:
+                # Проверяем, существует ли такой шаг в реестре, перед добавлением
+                if step_num in self._registry.get_step_numbers():
+                    step_instance = self._registry.get(step_num)
+                    step_entity = PipelineStep(
+                        step_number=step_num, step_name=step_instance.__class__.__name__
+                    )
+                    pipeline.add_step(step_entity)
+                else:
+                    logger.warning(f"Step {step_num} requested but not found in registry.")
+
+        self._save_pipeline(pipeline)
 
         # --- Выполнение ---
         completed_parallel: Set[int] = set()
         for step_num in step_numbers:
+            # Пропускаем шаги, которые не удалось добавить (нет в реестре)
+            if step_num not in {s.step_number for s in pipeline.steps}:
+                continue
+
             if step_num in completed_parallel:
                 continue
 

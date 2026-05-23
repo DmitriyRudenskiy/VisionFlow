@@ -6,7 +6,7 @@ from src.domain.pipeline.exceptions import StepNotFoundError
 class StepRegistry:
     """Реестр шагов пайплайна"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._steps: Dict[int, BaseStep] = {}
 
     def register(self, step_number: int, step: BaseStep) -> None:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from src.application.pipeline.orchestrator import PipelineOrchestrator
 from src.application.pipeline.step_registry import StepRegistry
-from src.application.pipeline.dto import PipelineConfigDTO, StepResultDTO
+from src.application.pipeline.dto import PipelineConfigDTO, StepResultDTO, StepConfigDTO
 from src.infrastructure.persistence.pipeline_repository import JsonPipelineRepository
 from src.domain.pipeline.entities import PipelineStep
 from src.domain.pipeline.value_objects import StepStatus, PipelineStatus
@@ -16,7 +16,8 @@ class FakeStep(BaseStep):
         self._name = name
         self._fail = fail
 
-    def execute(self, config: PipelineConfigDTO) -> StepResultDTO:
+    def execute(self, config: StepConfigDTO) -> StepResultDTO:
+        # Исправлено: используем StepConfigDTO
         if self._fail:
             return StepResultDTO(step_number=config.step_number, status="FAILED", message="Fake fail")
         return StepResultDTO(step_number=config.step_number, status="COMPLETED", message=f"Done {self._name}")

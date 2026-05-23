@@ -1,5 +1,18 @@
 ## CHANGELOG
 
+## [GLM-5]
+
+### Fixed (Исправлено)
+*   **Typing (Mypy)**: Исправлено предупреждение `annotation-unchecked` в `StepRegistry`. Для метода `__init__` явно указан тип возвращаемого значения `-> None`.
+*   **Tests**: Исправлена типизация в классе `FakeStep` (`tests/test_pipeline_resume.py`). Метод `execute` теперь принимает корректный `StepConfigDTO` вместо `PipelineConfigDTO`.
+*   **Concurrency**: Исправлена потенциальная_race condition (состояние гонки) при сохранении состояния пайплайна. В метод `_save_pipeline` добавлен `threading.Lock`.
+*   **Domain Logic**: Исправлена ошибка дублирования шагов в `PipelineAggregate`. Метод `add_step` теперь обновляет существующий шаг, вместо создания дубликата.
+
+### Changed (Изменено)
+*   **Orchestrator**: Улучшена логика режима Resume в `PipelineOrchestrator`. Теперь при восстановлении пайплайна автоматически добавляются шаги, переданные в конфигурации, но отсутствующие в сохраненном состоянии.
+
+---
+
 ## [DEEPSEEK] – 2026-05-23
 
 ### Added

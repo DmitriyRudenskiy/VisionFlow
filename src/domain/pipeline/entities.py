@@ -1,4 +1,4 @@
-# domain/pipeline/entities.py
+# src/domain/pipeline/entities.py
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,7 +91,12 @@ class PipelineAggregate:
         return hash(self.id)
 
     def add_step(self, step: PipelineStep) -> None:
-        self.steps.append(step)
+        # Улучшение: проверяем, есть ли шаг с таким номером, и заменяем его, чтобы избежать дубликатов
+        existing_index = next((i for i, s in enumerate(self.steps) if s.step_number == step.step_number), None)
+        if existing_index is not None:
+            self.steps[existing_index] = step
+        else:
+            self.steps.append(step)
         self.touch()
 
     def _get_step(self, step_number: int) -> PipelineStep:
