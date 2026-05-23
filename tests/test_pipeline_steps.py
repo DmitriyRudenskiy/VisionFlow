@@ -1,4 +1,3 @@
-# tests/test_pipeline_steps.py
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -6,26 +5,21 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.application.pipeline.dto import StepConfigDTO
-from src.application.pipeline.steps.step_0_flatten import Step0Flatten
-from src.application.pipeline.steps.step_1_prepare import Step1Prepare
-from src.application.pipeline.steps.step_2_deduplicate import Step2Deduplicate
-from src.application.pipeline.steps.step_3_visual_dups import Step3VisualDups
-from src.application.pipeline.steps.step_4_ai_crop import Step4AICrop
-from src.application.pipeline.steps.step_5_vectorize import Step5Vectorize
-from src.application.pipeline.steps.step_6_dwpose import Step6DWPose
-from src.application.pipeline.steps.step_7_colors import Step7Colors
-from src.application.pipeline.steps.step_8_nsfw import Step8NsfwScore
-from src.infrastructure.file_system import FileSystemService
+from src.application.pipeline.steps.flatten_directories_step import FlattenDirectoriesStep
+from src.application.pipeline.steps.prepare_images_step import PrepareImagesStep
+from src.application.pipeline.steps.exact_deduplication_step import ExactDeduplicationStep
+from src.application.pipeline.steps.visual_deduplication_step import VisualDeduplicationStep
+from src.application.pipeline.steps.smart_crop_step import SmartCropStep
+from src.application.pipeline.steps.embedding_extraction_step import EmbeddingExtractionStep
+from src.application.pipeline.steps.pose_extraction_step import PoseExtractionStep
+from src.application.pipeline.steps.color_palette_extraction_step import ColorPaletteExtractionStep
+from src.application.pipeline.steps.content_safety_step import ContentSafetyClassificationStep
+from src.infrastructure.file_system import FileSystemStorage
 
 
-@pytest.fixture
-def fs() -> FileSystemService:
-    return FileSystemService()
-
-
-def make_step_config(step_number: int, source: Path) -> StepConfigDTO:
+def make_step_config(sequence_number: int, source: Path) -> StepConfigDTO:
     return StepConfigDTO(
-        step_number=step_number,
+        sequence_number=sequence_number,
         params={"source_path": str(source), "output_path": str(source)},
     )
 
@@ -37,8 +31,8 @@ def create_test_file(path: Path, name: str, content: bytes = b"img") -> Path:
     return file_path
 
 
-class TestStep0Flatten:
-    def test_flatten_moves_files_to_root(self, tmp_path: Path) -> None:
+class TestFlattenDirectoriesStep:
+    def test_flatten_moves_files_to_root(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         nested = src / "sub"
@@ -48,7 +42,7 @@ class TestStep0Flatten:
         create_test_file(src, "c.jpg")
         create_test_file(nested, "c.jpg")
 
-        step = Step0Flatten(FileSystemService())
+        step = FlattenDirectoriesStep(file_storage)
         config = make_step_config(0, src)
         result = step.execute(config)
 
@@ -62,15 +56,15 @@ class TestStep0Flatten:
         assert any(f.name.startswith("c_") for f in root_files)
 
 
-class TestStep1Prepare:
-    def test_backup_and_rename(self, tmp_path: Path) -> None:
+class TestPrepareImagesStep:
+    def test_backup_and_rename(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "photo.jpg")
         create_test_file(src, "image.png")
         (src / "readme.txt").write_text("hello")
 
-        step = Step1Prepare(FileSystemService())
+        step = PrepareImagesStep(file_storage)
         config = make_step_config(1, src)
         result = step.execute(config)
 
@@ -86,12 +80,12 @@ class TestStep1Prepare:
         assert len(root_files) == 3
         assert (src / "readme.txt").exists()
 
-    def test_ignore_non_images(self, tmp_path: Path) -> None:
+    def test_ignore_non_images(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "data.bin")
 
-        step = Step1Prepare(FileSystemService())
+        step = PrepareImagesStep(file_storage)
         config = make_step_config(1, src)
         result = step.execute(config)
 
@@ -100,8 +94,8 @@ class TestStep1Prepare:
         assert (src / "data.bin").exists()
 
 
-class TestStep2Deduplicate:
-    def test_detect_exact_duplicates(self, tmp_path: Path) -> None:
+class TestExactDeduplicationStep:
+    def test_detect_exact_duplicates(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         content = b"duplicate content"
@@ -109,7 +103,7 @@ class TestStep2Deduplicate:
         create_test_file(src, "copy.jpg", content)
         create_test_file(src, "unique.png", b"different")
 
-        step = Step2Deduplicate(FileSystemService())
+        step = ExactDeduplicationStep(file_storage)
         config = make_step_config(2, src)
         result = step.execute(config)
 
@@ -124,8 +118,8 @@ class TestStep2Deduplicate:
         assert (src / "unique.png").exists()
 
 
-class TestStep3VisualDups:
-    def test_visual_duplicates_creates_report(self, tmp_path: Path) -> None:
+class TestVisualDeduplicationStep:
+    def test_visual_duplicates_creates_report(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "a.jpg")
@@ -134,7 +128,7 @@ class TestStep3VisualDups:
         detector = MagicMock()
         detector.calculate_phash.side_effect = ["hash_a", "hash_b"]
 
-        step = Step3VisualDups(FileSystemService(), detector)
+        step = VisualDeduplicationStep(file_storage, detector)
         config = make_step_config(3, src)
         result = step.execute(config)
 
@@ -145,7 +139,7 @@ class TestStep3VisualDups:
         assert "Visual Duplicates Report" in report.read_text()
         assert len(list((src / "_visual_duplicates").iterdir())) == 0
 
-    def test_visual_duplicates_moves_files(self, tmp_path: Path) -> None:
+    def test_visual_duplicates_moves_files(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "a.jpg", b"1")
@@ -154,7 +148,7 @@ class TestStep3VisualDups:
         detector = MagicMock()
         detector.calculate_phash.return_value = "same_hash"
 
-        step = Step3VisualDups(FileSystemService(), detector)
+        step = VisualDeduplicationStep(file_storage, detector)
         config = make_step_config(3, src)
         result = step.execute(config)
 
@@ -163,8 +157,8 @@ class TestStep3VisualDups:
         assert (src / "b.png").exists()
 
 
-class TestStep4AICrop:
-    def test_ai_crop_keeps_files_in_root(self, tmp_path: Path) -> None:
+class TestSmartCropStep:
+    def test_smart_crop_keeps_files_in_root(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "pic.jpg")
@@ -173,7 +167,7 @@ class TestStep4AICrop:
         segmenter = MagicMock()
         segmenter.crop_image.return_value = src / "pic.jpg"
 
-        step = Step4AICrop(FileSystemService(), segmenter)
+        step = SmartCropStep(file_storage, segmenter)
         config = make_step_config(4, src)
         result = step.execute(config)
 
@@ -182,7 +176,7 @@ class TestStep4AICrop:
         assert (src / "pic.jpg").exists()
         assert (src / "img.png").exists()
 
-    def test_ai_crop_handles_temp_file(self, tmp_path: Path) -> None:
+    def test_smart_crop_handles_temp_file(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "pic2.jpg")
@@ -193,7 +187,7 @@ class TestStep4AICrop:
         segmenter = MagicMock()
         segmenter.crop_image.return_value = temp_crop
 
-        step = Step4AICrop(FileSystemService(), segmenter)
+        step = SmartCropStep(file_storage, segmenter)
         config = make_step_config(4, src)
         result = step.execute(config)
 
@@ -203,8 +197,8 @@ class TestStep4AICrop:
         assert (src / "temp_crop.jpg").exists()
 
 
-class TestStep5Vectorize:
-    def test_creates_vector_json(self, tmp_path: Path) -> None:
+class TestEmbeddingExtractionStep:
+    def test_creates_vector_json(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "img.jpg")
@@ -212,7 +206,7 @@ class TestStep5Vectorize:
         vectorizer = MagicMock()
         vectorizer.get_embedding.return_value = [0.1] * 512
 
-        step = Step5Vectorize(FileSystemService(), vectorizer)
+        step = EmbeddingExtractionStep(file_storage, vectorizer)
         config = make_step_config(5, src)
         result = step.execute(config)
 
@@ -226,8 +220,8 @@ class TestStep5Vectorize:
         assert data["model"] == "Qwen-VL"
 
 
-class TestStep6DWPose:
-    def test_creates_pose_json(self, tmp_path: Path) -> None:
+class TestPoseExtractionStep:
+    def test_creates_pose_json(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "pose.jpg")
@@ -238,7 +232,7 @@ class TestStep6DWPose:
             "face": [], "left_hand": [], "right_hand": []
         }
 
-        step = Step6DWPose(FileSystemService(), pose_ext)
+        step = PoseExtractionStep(file_storage, pose_ext)
         config = make_step_config(6, src)
         result = step.execute(config)
 
@@ -251,8 +245,8 @@ class TestStep6DWPose:
         assert "total_keypoints" in data
 
 
-class TestStep7Colors:
-    def test_creates_colors_json(self, tmp_path: Path) -> None:
+class TestColorPaletteExtractionStep:
+    def test_creates_colors_json(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "colorful.jpg")
@@ -262,7 +256,7 @@ class TestStep7Colors:
             {"rgb": [1, 2, 3], "hex": "#010203", "percentage": 50.0}
         ]
 
-        step = Step7Colors(FileSystemService(), color_ext)
+        step = ColorPaletteExtractionStep(file_storage, color_ext)
         config = make_step_config(7, src)
         result = step.execute(config)
 
@@ -275,8 +269,8 @@ class TestStep7Colors:
         assert "colors" in data
 
 
-class TestStep8Nsfw:
-    def test_creates_nsfw_json(self, tmp_path: Path) -> None:
+class TestContentSafetyClassificationStep:
+    def test_creates_nsfw_json(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
         create_test_file(src, "safe.jpg")
@@ -284,7 +278,7 @@ class TestStep8Nsfw:
         nsfw_clf = MagicMock()
         nsfw_clf.classify.return_value = (0.1, 0.9)
 
-        step = Step8NsfwScore(FileSystemService(), nsfw_clf)
+        step = ContentSafetyClassificationStep(file_storage, nsfw_clf)
         config = make_step_config(8, src)
         result = step.execute(config)
 

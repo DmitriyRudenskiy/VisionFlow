@@ -1,9 +1,8 @@
-# src/infrastructure/ai/vit_client.py
-from src.application.ports import VisualDupDetectorPort
+from src.application.ports import VisualDuplicateDetectorPort
 import uuid
 
 
-class VisionTransformerClient(VisualDupDetectorPort):
+class VisionTransformerClient(VisualDuplicateDetectorPort):
     def calculate_phash(self, image_path):
         return f"phash_{uuid.uuid4().hex[:8]}"
 

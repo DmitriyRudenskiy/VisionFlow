@@ -1,9 +1,6 @@
-# src/infrastructure/ai/sam3_client.py
-from src.application.ports import AISegmenterPort
+from src.application.ports import ImageSegmentationPort
 
 
-class SAM3Client(AISegmenterPort):
+class SAM3Client(ImageSegmentationPort):
     def crop_image(self, image_path, mode="square"):
-        # Simulate creating a new file in a temp location or modifying in place
-        # Here we simulate returning the original path (in-place modification)
         return image_path

@@ -1,4 +1,3 @@
-# src/domain/pipeline/entities.py
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,8 +12,8 @@ from src.domain.pipeline.exceptions import InvalidStepStateTransition, StepNotFo
 class PipelineStep:
     """Сущность шага пайплайна"""
 
-    step_number: int
-    step_name: str
+    sequence_number: int
+    name: str
     id: UUID = field(default_factory=uuid4)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -24,7 +23,7 @@ class PipelineStep:
     completed_at: Optional[datetime] = None
     error: Optional[str] = None
 
-    def touch(self) -> None:
+    def update_modified_timestamp(self) -> None:
         self.updated_at = datetime.now(timezone.utc)
 
     def __eq__(self, other: object) -> bool:
@@ -38,32 +37,32 @@ class PipelineStep:
     def start(self) -> None:
         if self.status not in {StepStatus.PENDING, StepStatus.FAILED}:
             raise InvalidStepStateTransition(
-                f"Cannot start step '{self.step_name}' in status {self.status.value}. "
+                f"Cannot start step '{self.name}' in status {self.status.value}. "
                 f"Allowed: PENDING, FAILED."
             )
         self.status = StepStatus.RUNNING
         self.started_at = datetime.now(timezone.utc)
         self.error = None
-        self.touch()
+        self.update_modified_timestamp()
 
     def complete(self) -> None:
         if self.status != StepStatus.RUNNING:
             raise InvalidStepStateTransition(
-                f"Cannot complete step '{self.step_name}' in status {self.status.value}. Must be RUNNING."
+                f"Cannot complete step '{self.name}' in status {self.status.value}. Must be RUNNING."
             )
         self.status = StepStatus.COMPLETED
         self.completed_at = datetime.now(timezone.utc)
-        self.touch()
+        self.update_modified_timestamp()
 
     def fail(self, error: str) -> None:
         if self.status != StepStatus.RUNNING:
             raise InvalidStepStateTransition(
-                f"Cannot fail step '{self.step_name}' in status {self.status.value}. Must be RUNNING."
+                f"Cannot fail step '{self.name}' in status {self.status.value}. Must be RUNNING."
             )
         self.status = StepStatus.FAILED
         self.completed_at = datetime.now(timezone.utc)
         self.error = error
-        self.touch()
+        self.update_modified_timestamp()
 
 
 @dataclass
@@ -76,10 +75,10 @@ class PipelineAggregate:
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     status: PipelineStatus = PipelineStatus.PENDING
     steps: List[PipelineStep] = field(default_factory=list)
-    source_path: Path = Path()
-    output_path: Path = Path()
+    source_directory: Path = Path()
+    output_directory: Path = Path()
 
-    def touch(self) -> None:
+    def update_modified_timestamp(self) -> None:
         self.updated_at = datetime.now(timezone.utc)
 
     def __eq__(self, other: object) -> bool:
@@ -91,34 +90,40 @@ class PipelineAggregate:
         return hash(self.id)
 
     def add_step(self, step: PipelineStep) -> None:
-        # Улучшение: проверяем, есть ли шаг с таким номером, и заменяем его, чтобы избежать дубликатов
-        existing_index = next((i for i, s in enumerate(self.steps) if s.step_number == step.step_number), None)
+        existing_index = next(
+            (i for i, s in enumerate(self.steps) if s.sequence_number == step.sequence_number),
+            None,
+        )
         if existing_index is not None:
             self.steps[existing_index] = step
         else:
             self.steps.append(step)
-        self.touch()
+        self.update_modified_timestamp()
 
-    def _get_step(self, step_number: int) -> PipelineStep:
+    def find_step(self, sequence_number: int) -> Optional[PipelineStep]:
         for step in self.steps:
-            if step.step_number == step_number:
+            if step.sequence_number == sequence_number:
                 return step
-        raise StepNotFoundError(f"Step with number {step_number} not found")
+        return None
+
+    def _get_step(self, sequence_number: int) -> PipelineStep:
+        step = self.find_step(sequence_number)
+        if step is None:
+            raise StepNotFoundError(f"Step with number {sequence_number} not found")
+        return step
 
     def resume(self) -> None:
-        """Позволяет продолжить выполнение после FAILED или аварийного прерывания."""
         if self.status == PipelineStatus.FAILED:
             self.status = PipelineStatus.PENDING
-        # Сброс зависших шагов (например, после аварийного завершения процесса)
         for step in self.steps:
             if step.status == StepStatus.RUNNING:
                 step.status = StepStatus.FAILED
                 step.error = "Pipeline was interrupted during execution"
                 step.completed_at = datetime.now(timezone.utc)
-                step.touch()
-        self.touch()
+                step.update_modified_timestamp()
+        self.update_modified_timestamp()
 
-    def start_step(self, step_number: int) -> None:
+    def start_step(self, sequence_number: int) -> None:
         if self.status == PipelineStatus.COMPLETED:
             raise InvalidStepStateTransition("Pipeline is already completed")
         if self.status not in {PipelineStatus.PENDING, PipelineStatus.RUNNING}:
@@ -127,20 +132,20 @@ class PipelineAggregate:
             )
         if self.status == PipelineStatus.PENDING:
             self.status = PipelineStatus.RUNNING
-        step = self._get_step(step_number)
+        step = self._get_step(sequence_number)
         step.start()
-        self.touch()
+        self.update_modified_timestamp()
 
-    def complete_step(self, step_number: int) -> None:
-        step = self._get_step(step_number)
+    def complete_step(self, sequence_number: int) -> None:
+        step = self._get_step(sequence_number)
         step.complete()
         if all(s.status == StepStatus.COMPLETED for s in self.steps):
             self.status = PipelineStatus.COMPLETED
-        self.touch()
+        self.update_modified_timestamp()
 
-    def fail_step(self, step_number: int, error: str, critical: bool = True) -> None:
-        step = self._get_step(step_number)
+    def fail_step(self, sequence_number: int, error: str, critical: bool = True) -> None:
+        step = self._get_step(sequence_number)
         step.fail(error)
         if critical:
             self.status = PipelineStatus.FAILED
-        self.touch()
+        self.update_modified_timestamp()

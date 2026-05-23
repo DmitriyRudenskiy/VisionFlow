@@ -1,5 +1,107 @@
 ## CHANGELOG
 
+## [K2.6 Thinking] — 2026-05-23
+
+### Рефакторинг: DDD, SOLID, семантика имён
+
+#### Изменено (Breaking Changes)
+- **Доменные сущности**:
+  - `PipelineStep.step_number` → `sequence_number`
+  - `PipelineStep.step_name` → `name`
+  - `PipelineAggregate.source_path` / `output_path` → `source_directory` / `output_directory`
+  - `PipelineStep.touch()` → `update_modified_timestamp()`
+- **DTO**:
+  - `StepConfigDTO.step_number` → `sequence_number`
+  - `StepResultDTO.step_number` → `sequence_number`
+  - `PipelineConfigDTO.stop_on_error` → `halt_on_failure`
+- **Порты**:
+  - `FileSystemServicePort` → `StoragePort`
+  - `AISegmenterPort` → `ImageSegmentationPort`
+  - `VectorizationPort` → `ImageEmbeddingExtractorPort`
+  - `PoseExtractorPort` → `PoseExtractionPort`
+  - `ColorExtractorPort` → `ColorPaletteExtractorPort`
+  - `NsfwClassifierPort` → `ContentSafetyClassifierPort`
+  - `VisualDupDetectorPort` → `VisualDuplicateDetectorPort`
+  - Методы `write_text` / `read_text` / `write_json` / `read_json` → `persist_text` / `load_text` / `persist_json` / `load_json`
+- **Шаги пайплайна** — имена без порядковых номеров:
+  - `Step0Flatten` → `FlattenDirectoriesStep`
+  - `Step1Prepare` → `PrepareImagesStep`
+  - `Step2Deduplicate` → `ExactDeduplicationStep`
+  - `Step3VisualDups` → `VisualDeduplicationStep`
+  - `Step4AICrop` → `SmartCropStep`
+  - `Step5Vectorize` → `EmbeddingExtractionStep`
+  - `Step6DWPose` → `PoseExtractionStep`
+  - `Step7Colors` → `ColorPaletteExtractionStep`
+  - `Step8NsfwScore` → `ContentSafetyClassificationStep`
+- **Репозиторий** — конструктор теперь требует `PipelineSerializer`; сериализация вынесена из репозитория
+
+#### Добавлено
+- `BatchFileProcessingStep` — базовый класс для шагов 5–8, устраняющий дублирование шаблона «scan → process → write_json»
+- `PipelineSerializer` / `JsonPipelineSerializer` — абстракция сериализации (OCP)
+- `StoragePort.path_exists()` — явная проверка существования пути
+- Атомарная запись репозитория через временный файл (`.tmp` → `replace`)
+- Корректная отмена `Future` в параллельной группе при `halt_on_failure=True`
+- `PipelineAggregate.find_step()` — безопасный поиск шага по номеру (возвращает `Optional`)
+
+#### Исправлено
+- 26 ошибок `mypy` — несоответствие имён портов, полей DTO, импортов в тестах и CLI
+- Дублирование логики обработки результата шага в оркестраторе — вынесено в `_commit_step_result()`
+- Дублирование логики старта шага — вынесено в `_attempt_step_activation()`
+- Прямой вызов `open()` в шагах 3, 5–8 — заменён на методы `StoragePort`
+
+#### Тесты
+- Обновлены все тесты под новые имена полей, портов, конструкторов
+- `tests/conftest.py` — централизованные фикстуры `file_storage` и `repository`
+- `tests/test_pipeline_resume.py` — адаптирован под `sequence_number`, `halt_on_failure`, `JsonPipelineRepository` + serializer
+
+#### Инфраструктура
+- `scripts/verify_imports.py` — проверка разрешимости всех импортов после рефакторинга
+- `scripts/run_tests.py` — кроссплатформенный запуск pytest + verify_imports
+
+---
+
+### Миграция
+
+```python
+# Старый код
+from src.application.ports import FileSystemServicePort
+from src.application.pipeline.steps.step_0_flatten import Step0Flatten
+
+# Новый код
+from src.application.ports import StoragePort
+from src.application.pipeline.steps.flatten_directories_step import FlattenDirectoriesStep
+```
+
+```python
+# Старый DTO
+StepResultDTO(step_number=0, status="COMPLETED")
+
+# Новый DTO
+StepResultDTO(sequence_number=0, status="COMPLETED")
+```
+
+```python
+# Старый репозиторий
+repo = JsonPipelineRepository(Path("./data"))
+
+# Новый репозиторий
+repo = JsonPipelineRepository(
+    storage_dir=Path("./data"),
+    serializer=JsonPipelineSerializer(),
+)
+```
+
+---
+
+### Контрольный список проверки
+
+- [ ] `python3 -m mypy src tests` — 0 ошибок
+- [ ] `python3 -m pytest tests/ -v` — все тесты зелёные
+- [ ] `python3 scripts/verify_imports.py` — успешно
+- [ ] `python3 -m src.cli --help` — CLI запускается
+
+---
+
 ## [GLM-5]
 
 ### Fixed (Исправлено)

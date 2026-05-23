@@ -4,7 +4,7 @@ import logging
 
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
-from src.application.ports import FileSystemServicePort
+from src.application.ports import StoragePort
 from src.domain.image.value_objects import FilePath
 from src.domain.deduplication.value_objects import FileHash
 from src.domain.deduplication.entities import HashEntry, DuplicateGroup
@@ -13,16 +13,16 @@ from src.domain.image.exceptions import InvalidImageFormat
 logger = logging.getLogger(__name__)
 
 
-class Step2Deduplicate(BaseStep):
-    def __init__(self, fs_service: FileSystemServicePort):
-        self._fs = fs_service
+class ExactDeduplicationStep(BaseStep):
+    def __init__(self, storage: StoragePort):
+        self._storage = storage
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
         source_path = Path(config.params.get("source_path", "."))
         duplicates_path = source_path / "_duplicates"
-        self._fs.create_directory(duplicates_path)
+        self._storage.create_directory(duplicates_path)
 
-        all_files = self._fs.scan_directory(source_path, recursive=False)
+        all_files = self._storage.scan_directory(source_path, recursive=False)
 
         hash_map = defaultdict(list)
         skipped_count = 0
@@ -31,9 +31,9 @@ class Step2Deduplicate(BaseStep):
             try:
                 file_vo = FilePath(path=file_path)
 
-                hash_value = self._fs.get_file_hash(file_path, algorithm="md5")
-                file_size = self._fs.get_file_size(file_path)
-                modified_at = self._fs.get_file_modified_time(file_path)
+                hash_value = self._storage.get_file_hash(file_path, algorithm="md5")
+                file_size = self._storage.get_file_size(file_path)
+                modified_at = self._storage.get_file_modified_time(file_path)
 
                 entry = HashEntry(
                     file_hash=FileHash(algorithm="md5", value=hash_value),
@@ -59,11 +59,12 @@ class Step2Deduplicate(BaseStep):
 
                 for dup in group.duplicates:
                     dest_path = duplicates_path / dup.file_path.name
-                    self._fs.move_file(dup.file_path.path, dest_path)
+                    self._storage.move_file(dup.file_path.path, dest_path)
                     duplicates_found += 1
 
-        return StepResultDTO(
-            step_number=config.step_number,
-            status="COMPLETED",
+        return StepResultDTO.completed(
+            sequence_number=config.sequence_number,
             message=f"Found {duplicates_found} duplicates. Skipped {skipped_count} files.",
+            processed_count=duplicates_found,
+            skipped_count=skipped_count,
         )

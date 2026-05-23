@@ -9,14 +9,14 @@ class StepRegistry:
     def __init__(self) -> None:
         self._steps: Dict[int, BaseStep] = {}
 
-    def register(self, step_number: int, step: BaseStep) -> None:
-        self._steps[step_number] = step
+    def register(self, sequence_number: int, step: BaseStep) -> None:
+        self._steps[sequence_number] = step
 
-    def get(self, step_number: int) -> BaseStep:
-        if step_number not in self._steps:
-            raise StepNotFoundError(f"Step {step_number} not found in registry")
-        return self._steps[step_number]
+    def get(self, sequence_number: int) -> BaseStep:
+        if sequence_number not in self._steps:
+            raise StepNotFoundError(f"Step {sequence_number} not found in registry")
+        return self._steps[sequence_number]
 
-    def get_step_numbers(self) -> List[int]:
+    def get_registered_sequence_numbers(self) -> List[int]:
         """Возвращает отсортированный список номеров зарегистрированных шагов."""
         return sorted(self._steps.keys())

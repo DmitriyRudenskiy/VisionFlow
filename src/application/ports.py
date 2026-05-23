@@ -1,7 +1,6 @@
-# application/ports.py
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from src.domain.pipeline.entities import PipelineAggregate
@@ -19,8 +18,8 @@ class PipelineRepository(ABC):
     def find_by_id(self, id: UUID) -> Optional[PipelineAggregate]: ...
 
 
-class FileSystemServicePort(ABC):
-    """Порт для файловых операций"""
+class StoragePort(ABC):
+    """Порт для файловых операций и персистентности данных"""
 
     @abstractmethod
     def scan_directory(self, path: Path, recursive: bool = True) -> list[Path]: ...
@@ -43,8 +42,23 @@ class FileSystemServicePort(ABC):
     @abstractmethod
     def get_file_modified_time(self, path: Path) -> float: ...
 
+    @abstractmethod
+    def persist_text(self, path: Path, content: str, encoding: str = "utf-8") -> None: ...
 
-class VisualDupDetectorPort(ABC):
+    @abstractmethod
+    def load_text(self, path: Path, encoding: str = "utf-8") -> str: ...
+
+    @abstractmethod
+    def persist_json(self, path: Path, data: Any, encoding: str = "utf-8") -> None: ...
+
+    @abstractmethod
+    def load_json(self, path: Path, encoding: str = "utf-8") -> Any: ...
+
+    @abstractmethod
+    def path_exists(self, path: Path) -> bool: ...
+
+
+class VisualDuplicateDetectorPort(ABC):
     """Порт для поиска визуальных дубликатов (pHash + ViT)"""
 
     @abstractmethod
@@ -56,35 +70,35 @@ class VisualDupDetectorPort(ABC):
     ) -> float: ...
 
 
-class AISegmenterPort(ABC):
+class ImageSegmentationPort(ABC):
     """Порт для AI-сегментации и кропа (SAM3)"""
 
     @abstractmethod
     def crop_image(self, image_path: Path, mode: str = "square") -> Path: ...
 
 
-class VectorizationPort(ABC):
+class ImageEmbeddingExtractorPort(ABC):
     """Порт для извлечения эмбеддингов (Qwen-VL)"""
 
     @abstractmethod
     def get_embedding(self, image_path: Path) -> list[float]: ...
 
 
-class PoseExtractorPort(ABC):
+class PoseExtractionPort(ABC):
     """Порт для извлечения скелета позы (DWPose)"""
 
     @abstractmethod
     def extract_keypoints(self, image_path: Path) -> dict: ...
 
 
-class ColorExtractorPort(ABC):
+class ColorPaletteExtractorPort(ABC):
     """Порт для извлечения палитры цветов"""
 
     @abstractmethod
     def extract_palette(self, image_path: Path, num_colors: int = 5) -> list[dict]: ...
 
 
-class NsfwClassifierPort(ABC):
+class ContentSafetyClassifierPort(ABC):
     """Порт для классификации NSFW контента"""
 
     @abstractmethod

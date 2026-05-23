@@ -1,8 +1,6 @@
-# infrastructure/ai/qwen_client.py
-from src.application.ports import VectorizationPort
+from src.application.ports import ImageEmbeddingExtractorPort
 
 
-class QwenVLClient(VectorizationPort):
+class QwenVLClient(ImageEmbeddingExtractorPort):
     def get_embedding(self, image_path):
-        # Заглушка: возвращает список из 512 нулей
         return [0.0] * 512

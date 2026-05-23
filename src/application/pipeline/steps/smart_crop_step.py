@@ -1,19 +1,16 @@
-# src/application/pipeline/steps/step_4_ai_crop.py
 import logging
 from pathlib import Path
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
-from src.application.ports import FileSystemServicePort, AISegmenterPort
+from src.application.ports import StoragePort, ImageSegmentationPort
 
 logger = logging.getLogger(__name__)
 
 
-class Step4AICrop(BaseStep):
-    def __init__(
-        self, fs_service: FileSystemServicePort, ai_segmenter: AISegmenterPort
-    ):
-        self._fs = fs_service
-        self._segmenter = ai_segmenter
+class SmartCropStep(BaseStep):
+    def __init__(self, storage: StoragePort, segmenter: ImageSegmentationPort):
+        self._storage = storage
+        self._segmenter = segmenter
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
         source_path = Path(config.params.get("source_path", "."))
@@ -22,7 +19,7 @@ class Step4AICrop(BaseStep):
         if mode not in ["square", "mask", "transparent"]:
             raise ValueError(f"Unsupported crop mode: {mode}")
 
-        all_files = self._fs.scan_directory(source_path, recursive=False)
+        all_files = self._storage.scan_directory(source_path, recursive=False)
         cropped_count = 0
 
         for file_path in all_files:
@@ -32,22 +29,21 @@ class Step4AICrop(BaseStep):
             try:
                 cropped_image_path = self._segmenter.crop_image(file_path, mode=mode)
 
-                if cropped_image_path and cropped_image_path.exists():
+                if cropped_image_path and self._storage.path_exists(cropped_image_path):
                     if cropped_image_path != file_path:
                         dest_path = source_path / cropped_image_path.name
 
-                        # Handle name collision
-                        if dest_path.exists() and dest_path != file_path:
+                        if self._storage.path_exists(dest_path) and dest_path != file_path:
                             stem = dest_path.stem
                             suffix = dest_path.suffix
                             counter = 1
                             new_dest = dest_path
-                            while new_dest.exists():
+                            while self._storage.path_exists(new_dest):
                                 new_dest = source_path / f"{stem}_{counter}{suffix}"
                                 counter += 1
                             dest_path = new_dest
 
-                        self._fs.move_file(cropped_image_path, dest_path)
+                        self._storage.move_file(cropped_image_path, dest_path)
 
                     cropped_count += 1
                 else:
@@ -57,9 +53,8 @@ class Step4AICrop(BaseStep):
             except Exception as e:
                 logger.warning(f"Failed to crop {file_path.name}: {e}")
 
-        return StepResultDTO(
-            step_number=config.step_number,
-            status="COMPLETED",
+        return StepResultDTO.completed(
+            sequence_number=config.sequence_number,
             message=f"Successfully cropped {cropped_count} images in '{mode}' mode.",
             processed_count=cropped_count,
         )

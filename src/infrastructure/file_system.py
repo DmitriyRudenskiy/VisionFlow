@@ -1,28 +1,22 @@
-# infrastructure/file_system.py
 import hashlib
+import json
 import shutil
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
-from src.application.ports import FileSystemServicePort
+from src.application.ports import StoragePort
 
 
-class FileSystemService(FileSystemServicePort):
+class FileSystemStorage(StoragePort):
     def scan_directory(self, path: Path, recursive: bool = True) -> List[Path]:
         if not path.is_dir():
             return []
         pattern = "**/*" if recursive else "*"
-        files = []
-        for p in path.glob(pattern):
-            if p.is_file():
-                files.append(p)
-        return files
+        return [p for p in path.glob(pattern) if p.is_file()]
 
     def move_file(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() and destination != source:
-            # Remove destination to avoid shutil.move errors on Windows
-            # or cross-device issues when destination exists
             if destination.is_file():
                 destination.unlink(missing_ok=True)
             else:
@@ -48,3 +42,21 @@ class FileSystemService(FileSystemServicePort):
 
     def get_file_modified_time(self, path: Path) -> float:
         return path.stat().st_mtime
+
+    def persist_text(self, path: Path, content: str, encoding: str = "utf-8") -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding=encoding) as f:
+            f.write(content)
+
+    def load_text(self, path: Path, encoding: str = "utf-8") -> str:
+        with open(path, "r", encoding=encoding) as f:
+            return f.read()
+
+    def persist_json(self, path: Path, data: Any, encoding: str = "utf-8") -> None:
+        self.persist_text(path, json.dumps(data, ensure_ascii=False, indent=2), encoding)
+
+    def load_json(self, path: Path, encoding: str = "utf-8") -> Any:
+        return json.loads(self.load_text(path, encoding))
+
+    def path_exists(self, path: Path) -> bool:
+        return path.exists()
