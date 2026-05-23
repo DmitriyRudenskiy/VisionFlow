@@ -17,6 +17,6 @@ class StepRegistry:
             raise StepNotFoundError(f"Step {sequence_number} not found in registry")
         return self._steps[sequence_number]
 
-    def get_registered_sequence_numbers(self) -> List[int]:
+    def get_step_numbers(self) -> List[int]:
         """Возвращает отсортированный список номеров зарегистрированных шагов."""
         return sorted(self._steps.keys())

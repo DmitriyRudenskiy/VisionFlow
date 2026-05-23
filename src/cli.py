@@ -1,7 +1,9 @@
+# src/cli.py
 import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import List
 from uuid import UUID
 
 from src.application.pipeline.orchestrator import PipelineOrchestrator
@@ -26,8 +28,10 @@ from src.application.pipeline.steps.pose_extraction_step import PoseExtractionSt
 from src.application.pipeline.steps.color_palette_extraction_step import ColorPaletteExtractionStep
 from src.application.pipeline.steps.content_safety_step import ContentSafetyClassificationStep
 
+logger = logging.getLogger(__name__)
 
-def configure_logging(verbose: bool = False):
+
+def setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -37,92 +41,85 @@ def configure_logging(verbose: bool = False):
     )
 
 
-logger = logging.getLogger(__name__)
-
-
-def compose_orchestrator() -> PipelineOrchestrator:
+def build_container() -> PipelineOrchestrator:
+    """Собирает все зависимости и регистрирует шаги пайплайна."""
     repo = JsonPipelineRepository(
         storage_dir=Path("./data/pipelines"),
         serializer=JsonPipelineSerializer(),
     )
-    file_storage = FileSystemStorage()
+    fs_service = FileSystemStorage()
     logger.info("Initializing AI Clients...")
-    duplicate_detector = VisionTransformerClient()
-    image_segmenter = SAM3Client()
-    embedding_extractor = QwenVLClient()
+    visual_detector = VisionTransformerClient()
+    ai_segmenter = SAM3Client()
+    vectorizer = QwenVLClient()
     pose_extractor = DWPoseClient()
-    safety_classifier = NSFWClient()
-    palette_extractor = ColorExtractorClient()
+    nsfw_classifier = NSFWClient()
+    color_extractor = ColorExtractorClient()
 
     registry = StepRegistry()
-    registry.register(0, FlattenDirectoriesStep(file_storage))
-    registry.register(1, PrepareImagesStep(file_storage))
-    registry.register(2, ExactDeduplicationStep(file_storage))
-    registry.register(3, VisualDeduplicationStep(file_storage, duplicate_detector))
-    registry.register(4, SmartCropStep(file_storage, image_segmenter))
-    registry.register(5, EmbeddingExtractionStep(file_storage, embedding_extractor))
-    registry.register(6, PoseExtractionStep(file_storage, pose_extractor))
-    registry.register(7, ColorPaletteExtractionStep(file_storage, palette_extractor))
-    registry.register(8, ContentSafetyClassificationStep(file_storage, safety_classifier))
+    registry.register(0, FlattenDirectoriesStep(fs_service))
+    registry.register(1, PrepareImagesStep(fs_service))
+    registry.register(2, ExactDeduplicationStep(fs_service))
+    registry.register(3, VisualDeduplicationStep(fs_service, visual_detector))
+    registry.register(4, SmartCropStep(fs_service, ai_segmenter))  # убран аргумент default_mode
+    registry.register(5, EmbeddingExtractionStep(fs_service, vectorizer))
+    registry.register(6, PoseExtractionStep(fs_service, pose_extractor))
+    registry.register(7, ColorPaletteExtractionStep(fs_service, color_extractor))
+    registry.register(8, ContentSafetyClassificationStep(fs_service, nsfw_classifier))
 
     return PipelineOrchestrator(registry, repo)
 
 
-def validate_source_directory(source: Path) -> None:
-    if not source.exists():
-        logger.error(f"Исходная директория не найдена: {source}")
-        sys.exit(1)
-    if not source.is_dir():
-        logger.error(f"Указанный путь не является директорией: {source}")
-        sys.exit(1)
-
-
-def validate_requested_steps(requested_steps, registered_steps):
-    if not requested_steps:
-        return
-    invalid_steps = set(requested_steps) - set(registered_steps)
-    if invalid_steps:
-        logger.error(
-            f"Неизвестные шаги: {invalid_steps}. Доступные: {registered_steps}"
-        )
-        sys.exit(1)
-
-
-def main():
+def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="VisionFlow: Intelligent Image Processing Pipeline.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python -m src.cli ./input_images ./output_dir
-  python -m src.cli '/Users/user/Downloads/Новая папка' '/Users/user/Downloads/Новая папка' --steps 0
-  python -m src.cli ./input_images ./output_dir --pipeline-id 123e4567-e89b-12d3-a456-426614174000
+  python -m src.cli '/path/to/input' '/path/to/output' --steps 0 1 2
+  python -m src.cli ./input ./output --pipeline-id <uuid>
         """,
     )
-    parser.add_argument(
-        "source", type=Path, help="Путь к директории с исходными изображениями"
-    )
+    parser.add_argument("source", type=Path, help="Путь к директории с исходными изображениями")
     parser.add_argument("output", type=Path, help="Путь к выходной директории")
-    parser.add_argument("--steps", nargs="+", type=int, help="Список номеров шагов")
-    parser.add_argument("--pipeline-id", type=UUID, help="UUID существующего пайплайна")
-    parser.add_argument("--no-stop-on-error", action="store_true")
-    parser.add_argument("-v", "--verbose", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument("--steps", nargs="+", type=int, help="Список номеров шагов для выполнения")
+    parser.add_argument("--pipeline-id", type=UUID, help="UUID существующего пайплайна для возобновления")
+    parser.add_argument("--no-stop-on-error", action="store_true", help="Не останавливать пайплайн при первой ошибке")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Подробный вывод (DEBUG)")
+    return parser
 
-    configure_logging(args.verbose)
-    validate_source_directory(args.source)
 
+def validate_args(args: argparse.Namespace) -> None:
+    if not args.source.exists():
+        logger.error(f"Исходная директория не найдена: {args.source}")
+        sys.exit(1)
+    if not args.source.is_dir():
+        logger.error(f"Указанный путь не является директорией: {args.source}")
+        sys.exit(1)
     args.output.mkdir(parents=True, exist_ok=True)
 
-    orchestrator = compose_orchestrator()
-    registered_steps = orchestrator.get_registered_sequence_numbers()
-    validate_requested_steps(args.steps, registered_steps)
+
+def main() -> None:
+    parser = build_argument_parser()
+    args = parser.parse_args()
+    setup_logging(args.verbose)
+    validate_args(args)
+
+    orchestrator = build_container()
+    available_steps = orchestrator.get_available_steps()
+
+    if args.steps:
+        invalid_steps = set(args.steps) - set(available_steps)
+        if invalid_steps:
+            logger.error(f"Неизвестные шаги: {invalid_steps}. Доступные: {available_steps}")
+            sys.exit(1)
 
     config = PipelineConfigDTO(
         source_path=args.source.resolve(),
         output_path=args.output.resolve(),
         steps_to_run=args.steps,
-        halt_on_failure=not args.no_stop_on_error,
+        stop_on_error=not args.no_stop_on_error,
     )
 
     logger.info("Запуск VisionFlow Pipeline...")
@@ -130,10 +127,14 @@ Examples:
     logger.info(f"Output: {config.output_path}")
     if args.pipeline_id:
         logger.info(f"Resume Mode: ID={args.pipeline_id}")
+    if args.steps:
+        logger.info(f"Steps to run: {args.steps}")
+    else:
+        logger.info("All available steps will be executed")
 
     try:
         results = list(orchestrator.execute(config, pipeline_id=args.pipeline_id))
-        _print_execution_summary(results)
+        _print_summary(results)
     except ValueError as e:
         logger.error(f"Configuration Error: {e}")
         sys.exit(1)
@@ -145,21 +146,21 @@ Examples:
         sys.exit(1)
 
 
-def _print_execution_summary(results):
+def _print_summary(results: List) -> None:
     logger.info("\n" + "=" * 50)
     logger.info("PIPELINE EXECUTION SUMMARY")
     logger.info("=" * 50)
-    success_count = skip_count = fail_count = 0
+    success = skip = fail = 0
     for res in results:
         if res.status == "COMPLETED":
             icon = "✅"
-            success_count += 1
+            success += 1
         elif res.status == "SKIPPED":
             icon = "⏭️"
-            skip_count += 1
+            skip += 1
         else:
             icon = "❌"
-            fail_count += 1
+            fail += 1
         msg = f"{icon} Step {res.sequence_number}: {res.status}"
         if res.message:
             msg += f" | {res.message}"
@@ -171,9 +172,7 @@ def _print_execution_summary(results):
         else:
             logger.info(msg)
     logger.info("-" * 50)
-    logger.info(
-        f"Total: {success_count} succeeded, {skip_count} skipped, {fail_count} failed."
-    )
+    logger.info(f"Total: {success} succeeded, {skip} skipped, {fail} failed.")
     logger.info("=" * 50)
 
 

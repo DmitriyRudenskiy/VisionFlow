@@ -10,7 +10,7 @@ class PipelineConfigDTO:
     source_path: Path
     output_path: Path
     steps_to_run: Optional[List[int]] = None
-    halt_on_failure: bool = True
+    stop_on_error: bool = True
 
 
 @dataclass
@@ -69,20 +69,3 @@ class StepResultDTO:
             status="SKIPPED",
             message=message,
         )
-
-
-@dataclass
-class ImageProcessingResultDTO:
-    source_path: Path
-    processed_path: Optional[Path] = None
-    is_duplicate: bool = False
-    error: Optional[str] = None
-
-
-@dataclass
-class MetadataResultDTO:
-    file_path: Path
-    vector: Optional[List[float]] = None
-    colors: Optional[List[Dict]] = None
-    nsfw_score: Optional[float] = None
-    pose_keypoints: Optional[Dict] = None

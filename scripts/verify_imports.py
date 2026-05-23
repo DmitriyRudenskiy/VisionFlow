@@ -34,7 +34,7 @@ def verify():
         sys.exit(1)
 
     print("✅ All module imports resolved successfully.")
-    print("   Verified domains: Pipeline, Application, Infrastructure")
+    print("   Verified domains: Pipeline, Application, Infrastructure, AI clients")
     sys.exit(0)
 
 
