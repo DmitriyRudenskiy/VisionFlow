@@ -1,3 +1,4 @@
+# src/application/pipeline/steps/batch_file_step.py
 import logging
 from abc import abstractmethod
 from pathlib import Path
@@ -44,12 +45,17 @@ class BatchFileProcessingStep(BaseStep):
                 continue
 
             out_json = output_dir / f"{file_path.stem}{self.output_suffix}"
+
+            # Идемпотентность: пропуск, если файл уже существует
             if self._storage.path_exists(out_json):
                 processed_count += 1
                 continue
 
             try:
                 data = self.process_file(file_path)
+                if data is None:
+                    raise ValueError("Processing returned no data")
+
                 self._storage.persist_json(out_json, data)
                 processed_count += 1
             except Exception as e:

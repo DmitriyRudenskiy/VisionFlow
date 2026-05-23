@@ -6,18 +6,25 @@ from pathlib import Path
 from typing import List
 from uuid import UUID
 
+# Application Layer
 from src.application.pipeline.orchestrator import PipelineOrchestrator
 from src.application.pipeline.step_registry import StepRegistry
 from src.application.pipeline.dto import PipelineConfigDTO
+
+# Infrastructure Layer
 from src.infrastructure.file_system import FileSystemStorage
 from src.infrastructure.persistence.pipeline_repository import JsonPipelineRepository
 from src.infrastructure.persistence.pipeline_serializer import JsonPipelineSerializer
+
+# AI Clients
 from src.infrastructure.ai.vit_client import VisionTransformerClient
 from src.infrastructure.ai.sam3_client import SAM3Client
 from src.infrastructure.ai.qwen_client import QwenVLClient
 from src.infrastructure.ai.dwpose_client import DWPoseClient
 from src.infrastructure.ai.nsfw_client import NSFWClient
 from src.infrastructure.ai.color_client import ColorExtractorClient
+
+# Steps
 from src.application.pipeline.steps.flatten_directories_step import FlattenDirectoriesStep
 from src.application.pipeline.steps.prepare_images_step import PrepareImagesStep
 from src.application.pipeline.steps.exact_deduplication_step import ExactDeduplicationStep
@@ -48,7 +55,9 @@ def build_container() -> PipelineOrchestrator:
         serializer=JsonPipelineSerializer(),
     )
     fs_service = FileSystemStorage()
+
     logger.info("Initializing AI Clients...")
+    # Инициализация реальных или заглушек AI-клиентов
     visual_detector = VisionTransformerClient()
     ai_segmenter = SAM3Client()
     vectorizer = QwenVLClient()
@@ -61,7 +70,7 @@ def build_container() -> PipelineOrchestrator:
     registry.register(1, PrepareImagesStep(fs_service))
     registry.register(2, ExactDeduplicationStep(fs_service))
     registry.register(3, VisualDeduplicationStep(fs_service, visual_detector))
-    registry.register(4, SmartCropStep(fs_service, ai_segmenter))  # убран аргумент default_mode
+    registry.register(4, SmartCropStep(fs_service, ai_segmenter))
     registry.register(5, EmbeddingExtractionStep(fs_service, vectorizer))
     registry.register(6, PoseExtractionStep(fs_service, pose_extractor))
     registry.register(7, ColorPaletteExtractionStep(fs_service, color_extractor))
@@ -109,6 +118,7 @@ def main() -> None:
     orchestrator = build_container()
     available_steps = orchestrator.get_available_steps()
 
+    # Валидация запрашиваемых шагов
     if args.steps:
         invalid_steps = set(args.steps) - set(available_steps)
         if invalid_steps:
@@ -161,9 +171,11 @@ def _print_summary(results: List) -> None:
         else:
             icon = "❌"
             fail += 1
+
         msg = f"{icon} Step {res.sequence_number}: {res.status}"
         if res.message:
             msg += f" | {res.message}"
+
         if res.status == "FAILED":
             logger.warning(msg)
             if res.errors:
@@ -171,6 +183,7 @@ def _print_summary(results: List) -> None:
                     logger.error(f"   └── Error: {err}")
         else:
             logger.info(msg)
+
     logger.info("-" * 50)
     logger.info(f"Total: {success} succeeded, {skip} skipped, {fail} failed.")
     logger.info("=" * 50)
