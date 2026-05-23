@@ -1,4 +1,4 @@
-# cli.py
+# src/cli.py
 import argparse
 import logging
 import sys

@@ -4,6 +4,7 @@ from datetime import datetime
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
 from src.application.ports import FileSystemServicePort
+from src.domain.image.value_objects import SUPPORTED_EXTENSIONS
 
 
 class Step1Prepare(BaseStep):
@@ -19,21 +20,19 @@ class Step1Prepare(BaseStep):
         processed_count = 0
 
         for file_path in all_files:
-            if file_path.parent == backup_path or file_path.is_dir():
+            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 continue
 
-            # Бэкап оригиналов
             backup_dest = backup_path / file_path.name
-            self._fs.copy_file(file_path, backup_dest)
+            if not backup_dest.exists():
+                self._fs.copy_file(file_path, backup_dest)
 
-            # Переименование по timestamp, с сохранением оригинального расширения
             mtime = self._fs.get_file_modified_time(file_path)
             timestamp_str = datetime.fromtimestamp(mtime).strftime("%Y%m%d_%H%M%S")
             new_stem = f"{timestamp_str}_{processed_count}"
-            new_name = f"{new_stem}{file_path.suffix}"  # используем исходный суффикс
+            new_name = f"{new_stem}{file_path.suffix}"
             dest_path = source_path / new_name
 
-            # Проверка на существование и добавление суффикса при необходимости
             counter = 1
             while dest_path.exists():
                 new_name = f"{new_stem}_{counter}{file_path.suffix}"

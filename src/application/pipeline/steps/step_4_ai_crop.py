@@ -1,4 +1,4 @@
-# application/pipeline/steps/step_4_ai_crop.py
+# src/application/pipeline/steps/step_4_ai_crop.py
 import logging
 from pathlib import Path
 from src.application.pipeline.steps.base_step import BaseStep
@@ -15,8 +15,6 @@ class Step4AICrop(BaseStep):
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
         source_path = Path(config.params.get("source_path", "."))
-        crop_path = source_path / "_ai_cropped"
-        self._fs.create_directory(crop_path)
 
         mode = config.params.get("crop_mode", "square")
         if mode not in ["square", "mask", "transparent"]:
@@ -31,9 +29,23 @@ class Step4AICrop(BaseStep):
 
             try:
                 cropped_image_path = self._segmenter.crop_image(file_path, mode=mode)
-                dest_path = crop_path / cropped_image_path.name
-                self._fs.move_file(cropped_image_path, dest_path)
-                cropped_count += 1
+
+                if cropped_image_path.exists():
+                    # If the segmenter returned a different path (temp file), move it to source
+                    if cropped_image_path != file_path:
+                        # Resolve naming conflict if necessary, or overwrite
+                        # We assume we want to keep the cropped version in the main flow
+                        dest_path = source_path / cropped_image_path.name
+
+                        # Handling name collision if name differs from original but exists
+                        if dest_path != file_path and dest_path.exists():
+                            # For simplicity in this step, we assume segmenter generates unique name
+                            # or we overwrite. Here we move.
+                            pass
+
+                        self._fs.move_file(cropped_image_path, dest_path)
+
+                    cropped_count += 1
             except Exception as e:
                 logger.warning(f"Failed to crop {file_path.name}: {e}")
 

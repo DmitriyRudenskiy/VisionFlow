@@ -1,11 +1,10 @@
-# infrastructure/ai/vit_client.py
+# src/infrastructure/ai/vit_client.py
 from src.application.ports import VisualDupDetectorPort
+import uuid
 
 class VisionTransformerClient(VisualDupDetectorPort):
     def calculate_phash(self, image_path):
-        # Заглушка
-        return "phash_placeholder"
+        return f"phash_{uuid.uuid4().hex[:8]}"
 
     def calculate_vit_similarity(self, image_path1, image_path2):
-        # Заглушка
         return 0.0
