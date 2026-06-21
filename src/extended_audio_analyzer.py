@@ -1,111 +1,101 @@
 from __future__ import annotations
 
-import json
 import sys
 import argparse
+
+
+# ==================== БЫСТРАЯ ПРОВЕРКА АРГУМЕНТОВ (ДО ТЯЖЕЛЫХ ИМПОРТОВ) ====================
+def parse_args_early():
+    parser = argparse.ArgumentParser(description="AI-анализатор аудио v6.5.0 (Music Context Aware)")
+    parser.add_argument('files', nargs='*', help='Путь к аудиофайлу(ам)')
+    parser.add_argument('--output', '-o', help='Папка для сохранения JSON')
+    parser.add_argument('--no-save', action='store_true', help='Не сохранять JSON файлы')
+    parser.add_argument('--json', action='store_true', help='Выводить только сырой JSON в консоль')
+    parser.add_argument('--no-color', action='store_true', help='Отключить цвета в консоли')
+    parser.add_argument('--recursive', '-r', action='store_true', help='Рекурсивный поиск файлов в папках')
+    parser.add_argument('--no-whisper', action='store_true', help='Отключить выделение и распознавание вокала')
+    parser.add_argument('--whisper-model', default='openai/whisper-large-v3-turbo', help='Модель Whisper')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Подробный лог')
+    parser.add_argument('--quiet', '-q', action='store_true', help='Только ошибки')
+
+    args = parser.parse_args()
+    if not args.files:
+        parser.print_help()
+        sys.exit(0)
+    return args
+
+
+EARLY_ARGS = parse_args_early()
+
+# ==================== ТЯЖЕЛЫЕ ИМПОРТЫ ====================
+import json
 import logging
-import warnings
-import tempfile
-import urllib.request
-import urllib.error
+import re
+import os
+import gc
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import TypedDict, Any
+from typing import TypedDict, Optional
+
 import numpy as np
+import librosa
+from scipy.signal import medfilt
+from scipy.fft import fft, ifft, next_fast_len
+from sklearn.cluster import KMeans
+import essentia
+import essentia.standard as es
 
-# Отключаем специфичные предупреждения
-warnings.filterwarnings('ignore', category=UserWarning, module='librosa')
-warnings.filterwarnings('ignore', category=RuntimeWarning)
-warnings.filterwarnings('ignore', category=FutureWarning)
+ESSENTIA_AVAILABLE = True
 
-# ==================== ВЕРСИЯ ====================
-__version__ = "4.1.0"
-
-# ==================== ЗАВИСИМОСТИ ====================
-try:
-    import librosa
-except ImportError:
-    print("Ошибка: Библиотека librosa не установлена. Установите: pip install librosa")
-    sys.exit(1)
-
-try:
-    from scipy.signal import medfilt
-    from scipy.fft import fft, ifft, next_fast_len
-except ImportError:
-    print("Ошибка: Библиотека scipy не установлена. Установите: pip install scipy")
-    sys.exit(1)
-
-try:
-    from sklearn.cluster import KMeans
-
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
-
-try:
-    import essentia
-    import essentia.standard as es
-except ImportError:
-    print("Ошибка: Библиотека essentia не установлена. Установите: pip install essentia")
-    sys.exit(1)
-
-whisper_available = False
-try:
-    import whisper
-
-    whisper_available = True
-except ImportError:
-    pass
-
-try:
-    import soundfile as sf
-
-    SOUNDFILE_AVAILABLE = True
-except ImportError:
-    SOUNDFILE_AVAILABLE = False
-
-try:
-    from tqdm import tqdm
-except ImportError:
-    def tqdm(iterable, *args, **kwargs):
-        return iterable
-
-# ==================== ЛОГГИРОВАНИЕ ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+try:
+    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+    logger.warning("Transformers not installed. Install with: pip install transformers")
+
+import soundfile as sf
+from tqdm import tqdm
+import torch
+from demucs import pretrained
+from demucs.apply import apply_model
+
+DEMUCS_AVAILABLE = True
+
+__version__ = "6.5.0"
 
 
-# ==================== JSON ENCODER ====================
-class NumpyJSONEncoder(json.JSONEncoder):
-    def default(self, obj: Any) -> Any:
-        if isinstance(obj, np.integer): return int(obj)
-        if isinstance(obj, np.floating): return float(obj)
-        if isinstance(obj, np.ndarray): return obj.tolist()
-        return super().default(obj)
+def clear_memory():
+    gc.collect()
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
+    elif torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
-# ==================== ЦВЕТНОЙ ВЫВОД ====================
-class Colorizer:
-    _codes = {
-        'RED': '\033[91m', 'GREEN': '\033[92m', 'YELLOW': '\033[93m',
-        'BLUE': '\033[94m', 'MAGENTA': '\033[95m', 'CYAN': '\033[96m',
-        'WHITE': '\033[97m', 'BOLD': '\033[1m', 'UNDERLINE': '\033[4m',
-        'RESET': '\033[0m'
-    }
-
-    def __init__(self, enabled: bool = True):
-        self.enabled = enabled and sys.stdout.isatty()
-
-    def wrap(self, text: str, *styles: str) -> str:
-        if not self.enabled: return str(text)
-        prefix = "".join(self._codes.get(s, '') for s in styles)
-        return f"{prefix}{text}{self._codes['RESET']}"
+def setup_logging(verbose: bool = False, quiet: bool = False):
+    if quiet:
+        level = logging.ERROR
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S', force=True)
+    logger.setLevel(level)
+    logging.getLogger('librosa').setLevel(logging.WARNING)
+    if ESSENTIA_AVAILABLE: logging.getLogger('essentia').setLevel(logging.WARNING)
+    if WHISPER_AVAILABLE: logging.getLogger('transformers').setLevel(logging.WARNING)
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    logging.getLogger('huggingface_hub').setLevel(logging.WARNING)
 
 
 # ==================== КОНСТАНТЫ ====================
@@ -121,13 +111,14 @@ BELLMAN_MAJOR = np.array([0.169, 0.003, 0.041, 0.003, 0.117, 0.013, 0.003, 0.212
 BELLMAN_MINOR = np.array([0.181, 0.003, 0.048, 0.074, 0.013, 0.034, 0.003, 0.214, 0.074, 0.013, 0.034, 0.013])
 METHOD_WEIGHTS = {
     'Krumhansl-Schmuckler': 0.8, 'Temperley': 1.0, 'Albrecht-Shanahan': 1.3,
-    'Bellman': 1.1, 'Bass Analysis': 1.2, 'Track Boundaries': 0.9,
+    'Bellman': 1.1, 'Bass Analysis': 1.5, 'Track Boundaries': 0.9,
     'Chord Voting': 1.3, 'Circle of Fifths': 0.8, 'Spectral Analysis': 0.7,
     'Essentia': 1.5,
 }
+AUDIO_EXTS = {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.opus', '.aiff'}
 
 
-# ==================== ТИПИЗАЦИЯ И DATACLASSES ====================
+# ==================== ТИПИЗАЦИЯ ====================
 class MethodResult(TypedDict, total=False):
     method: str;
     pitch_class: int;
@@ -147,23 +138,37 @@ class AnalysisConfig:
     normalize_audio: bool = True
     bpm_min: int = 40;
     bpm_max: int = 220;
-    use_whisper: bool = False;
-    whisper_model: str = "base"
+    use_whisper: bool = True
+    whisper_model: str = "openai/whisper-large-v3-turbo";
+    whisper_cache_dir: Optional[str] = None
     analyze_sections: bool = True;
     analyze_rhythm: bool = True;
     analyze_vocal: bool = True
     analyze_chords: bool = True;
-    analyze_dynamics: bool = True
-    analyze_timbre: bool = True;
-    analyze_genre: bool = True
+    analyze_dynamics: bool = True;
+    analyze_timbre: bool = True
+    analyze_genre: bool = True;
+    analyze_contour: bool = True;
+    analyze_texture: bool = True
     use_neural_api: bool = False;
     neural_api_url: str = "http://localhost:8000/predict"
+    vocal_backend: str = "demucs";
+    segment_duration_sec: float = 8.0;
+    min_section_duration: float = 10.0
+    vocal_min_frames: float = 0.25;
+    vocal_gap_frames: float = 0.3;
+    use_phonetic: bool = True
+    use_stress: bool = True;
+    max_autocorr_duration: float = 60.0;
+    chroma_reduction: Optional[int] = None
+    demucs_chunk_sec: float = 7.0
 
 
 @dataclass
 class AudioFeatures:
     y: np.ndarray;
     y_perc: np.ndarray;
+    y_harm: np.ndarray;
     sr: int;
     chroma: np.ndarray;
     bass_chroma: np.ndarray
@@ -174,7 +179,7 @@ class AudioFeatures:
     spectral_centroid: np.ndarray | None = None;
     spectral_contrast: np.ndarray | None = None
     spectral_rolloff: np.ndarray | None = None;
-    zero_crossing_rate: np.ndarray | None = None
+    zero_crossing_rate: np.ndarray | None = None;
     mfccs: np.ndarray | None = None
 
 
@@ -194,59 +199,114 @@ class ExtendedResult:
     rhythm: dict | None = None;
     vocal: dict | None = None
     chords: dict | None = None;
-    dynamics: dict | None = None
-    timbre: dict | None = None;
+    dynamics: dict | None = None;
+    timbre: dict | None = None
     genre: dict | None = None;
-    neural_analysis: dict | None = None
+    neural_analysis: dict | None = None;
+    contour: dict | None = None;
+    texture: dict | None = None
+    theme_hints: str = "";
     all_results: list = field(default_factory=list);
     voting: dict = field(default_factory=dict);
     error: str | None = None
 
-    def to_dict(self) -> dict:
-        return {
-            'file': self.file, 'duration_seconds': self.duration_seconds, 'sample_rate': self.sample_rate,
-            'key': self.key, 'mode': self.mode, 'confidence': self.confidence,
-            'confidence_level': self.confidence_level,
-            'votes': self.votes, 'total_methods': self.total_methods, 'bpm': self.bpm,
-            'structure': self.structure, 'rhythm': self.rhythm, 'vocal': self.vocal, 'chords': self.chords,
-            'dynamics': self.dynamics, 'timbre': self.timbre, 'genre': self.genre,
-            'neural_analysis': self.neural_analysis,
-            'all_results': self.all_results, 'voting': self.voting
-        }
+    def to_dict(self) -> dict: return {k: v for k, v in self.__dict__.items()}
 
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== УТИЛИТЫ ====================
+class NumpyJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer): return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        if isinstance(obj, np.bool_): return bool(obj)
+        return super().default(obj)
+
+
+class Colorizer:
+    _codes = {'RED': '\033[91m', 'GREEN': '\033[92m', 'YELLOW': '\033[93m', 'BLUE': '\033[94m', 'MAGENTA': '\033[95m',
+              'CYAN': '\033[96m', 'WHITE': '\033[97m', 'BOLD': '\033[1m', 'UNDERLINE': '\033[4m', 'RESET': '\033[0m'}
+
+    def __init__(self, enabled: bool = True): self.enabled = enabled and sys.stdout.isatty()
+
+    def wrap(self, text: str, *styles: str) -> str:
+        if not self.enabled: return str(text)
+        return f"{''.join(self._codes.get(s, '') for s in styles)}{text}{self._codes['RESET']}"
+
+
 def normalize_key(key_name: str) -> str:
     try:
-        midi = librosa.note_to_midi(key_name);
-        pc = midi % 12;
-        return NOTE_NAMES[pc]
+        return NOTE_NAMES[librosa.note_to_midi(key_name) % 12]
     except Exception:
         mapping = {'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#', 'Cb': 'B', 'Fb': 'E', 'B#': 'C',
-                   'E#': 'F', 'C': 'C', 'D': 'D', 'E': 'E', 'F': 'F', 'G': 'G', 'A': 'A', 'B': 'B', 'C#': 'C#',
-                   'D#': 'D#', 'F#': 'F#', 'G#': 'G#', 'A#': 'A#'}
+                   'E#': 'F'}
         return mapping.get(key_name, key_name)
 
 
 def normalize_audio(y: np.ndarray, target_db: float = -3.0) -> np.ndarray:
     peak = np.max(np.abs(y))
-    if peak == 0: return y
-    target_peak = 10 ** (target_db / 20.0)
-    return y * (target_peak / peak)
+    return y if peak == 0 else y * (10 ** (target_db / 20.0) / peak)
 
 
-# ==================== БАЗОВЫЙ КЛАСС И МЕТОДЫ ОПРЕДЕЛЕНИЯ ТОНАЛЬНОСТИ ====================
+def get_audio_files(paths: list[str], recursive: bool = False) -> list[Path]:
+    files = []
+    for p in paths:
+        path = Path(p)
+        if path.is_file() and path.suffix.lower() in AUDIO_EXTS:
+            files.append(path)
+        elif path.is_dir():
+            pattern = path.rglob('*') if recursive else path.glob('*')
+            files.extend([f for f in pattern if f.is_file() and f.suffix.lower() in AUDIO_EXTS])
+    return sorted(list(set(files)))
+
+
+def soundex(word: str) -> str:
+    word = word.upper();
+    first = word[0]
+    mapping = {'B': '1', 'F': '1', 'P': '1', 'V': '1', 'C': '2', 'G': '2', 'J': '2', 'K': '2', 'Q': '2', 'S': '2',
+               'X': '2', 'Z': '2', 'D': '3', 'T': '3', 'L': '4', 'M': '5', 'N': '5', 'R': '6'}
+    code = [first] + [mapping.get(ch, '0') for ch in word[1:]]
+    result = []
+    for c in code:
+        if not result or result[-1] != c: result.append(c)
+    return ''.join([result[0]] + [c for c in result[1:] if c != '0'])[:4].ljust(4, '0')
+
+
+def phonetic_similarity(s1: str, s2: str) -> float: return 1.0 if s1 and s2 and soundex(s1) == soundex(s2) else 0.0
+
+
+def get_syllables(text: str, lang: str) -> int:
+    if not text: return 0
+    cyrillic_langs = ['ru', 'uk', 'be', 'bg', 'mn', 'kk', 'ky', 'tg']
+    vowels_cyr = 'аеёиоуыэюяАЕЁИОУЫЭЮЯөӨүҮ'
+    vowels_lat = 'aeiouyAEIOUY'
+    is_cyrillic = lang in cyrillic_langs or any(c in text for c in 'өӨүҮ')
+    return len(re.findall(f'[{vowels_cyr}]', text)) if is_cyrillic else len(re.findall(f'[{vowels_lat}]+', text))
+
+
+def get_rhyme_ending(text: str, lang: str) -> str:
+    if not text: return ""
+    text = text.strip().lower()
+    vowels = 'аеёиоуыэюяөү' if lang in ['ru', 'uk', 'be', 'bg', 'mn'] else 'aeiouy'
+    matches = list(re.finditer(f'[{vowels}]', text))
+    return text[-3:] if len(text) >= 3 else text if len(matches) < 2 else text[matches[-2].start():]
+
+
+# ==================== КЛАССЫ ТОНАЛЬНОСТИ ====================
 class KeyMethod:
     name: str = "BaseMethod";
     weight: float = 1.0
 
     def __init__(self, features: AudioFeatures):
-        self.features = features; self._chroma_avg = None
+        self.features = features;
+        self._chroma_avg = None
 
     @property
     def chroma_avg(self) -> np.ndarray:
         if self._chroma_avg is None:
-            self._chroma_avg = np.mean(self.features.chroma, axis=1) - np.mean(np.mean(self.features.chroma, axis=1))
+            # ИСПРАВЛЕНИЕ v6.5.0: Использование медианы для устойчивости к шумовым выбросам (обертоны морин хуура)
+            self._chroma_avg = np.median(self.features.chroma, axis=1) - np.median(
+                np.median(self.features.chroma, axis=1))
             norm = np.linalg.norm(self._chroma_avg)
             if norm > 0: self._chroma_avg = self._chroma_avg / norm
         return self._chroma_avg
@@ -254,169 +314,135 @@ class KeyMethod:
     def detect(self) -> MethodResult:
         raise NotImplementedError
 
-    def result(self, key_pc: int, mode: str, score: float, confidence: float) -> MethodResult:
+    def result(self, key_pc, mode, score, confidence):
         return {'method': self.name, 'pitch_class': int(key_pc), 'key': NOTE_NAMES[key_pc], 'mode': mode,
                 'score': float(score), 'confidence': float(np.clip(confidence, 0.0, 1.0)), 'weight': self.weight}
 
 
 class ProfileMethod(KeyMethod):
-    _maj_matrices: dict = {};
-    _min_matrices: dict = {}
+    _maj_matrices, _min_matrices = {}, {}
 
-    def __init__(self, major_profile: np.ndarray, minor_profile: np.ndarray, method_name: str, features: AudioFeatures):
-        super().__init__(features);
-        self.name = method_name;
-        self.weight = METHOD_WEIGHTS.get(self.name, 1.0)
+    def __init__(self, major_profile, minor_profile, method_name, features):
+        super().__init__(features)
+        self.name, self.weight = method_name, METHOD_WEIGHTS.get(method_name, 1.0)
         if method_name not in self._maj_matrices:
-            maj_norm = major_profile - np.mean(major_profile);
+            maj_norm = (major_profile - np.mean(major_profile));
             maj_norm /= np.linalg.norm(maj_norm)
-            self._maj_matrices[method_name] = np.array([np.roll(maj_norm, i) for i in range(12)])
-            min_norm = minor_profile - np.mean(minor_profile);
+            min_norm = (minor_profile - np.mean(minor_profile));
             min_norm /= np.linalg.norm(min_norm)
+            self._maj_matrices[method_name] = np.array([np.roll(maj_norm, i) for i in range(12)])
             self._min_matrices[method_name] = np.array([np.roll(min_norm, i) for i in range(12)])
-        self.maj_matrix = self._maj_matrices[method_name];
-        self.min_matrix = self._min_matrices[method_name]
+        self.maj_matrix, self.min_matrix = self._maj_matrices[method_name], self._min_matrices[method_name]
 
-    def detect(self) -> MethodResult:
+    def detect(self):
         avg = self.chroma_avg
-        maj_corrs = np.dot(self.maj_matrix, avg);
-        min_corrs = np.dot(self.min_matrix, avg)
-        best_maj_idx = int(np.argmax(maj_corrs));
-        best_min_idx = int(np.argmax(min_corrs))
-        if maj_corrs[best_maj_idx] > min_corrs[best_min_idx]:
-            return self.result(best_maj_idx, 'Major', maj_corrs[best_maj_idx], (maj_corrs[best_maj_idx] + 1) / 2)
-        else:
-            return self.result(best_min_idx, 'Minor', min_corrs[best_min_idx], (min_corrs[best_min_idx] + 1) / 2)
+        maj_corrs, min_corrs = np.dot(self.maj_matrix, avg), np.dot(self.min_matrix, avg)
+        bmi, bni = int(np.argmax(maj_corrs)), int(np.argmax(min_corrs))
+        if maj_corrs[bmi] > min_corrs[bni]: return self.result(bmi, 'Major', maj_corrs[bmi], (maj_corrs[bmi] + 1) / 2)
+        return self.result(bni, 'Minor', min_corrs[bni], (min_corrs[bni] + 1) / 2)
 
 
 class BassMethod(KeyMethod):
-    name = "Bass Analysis";
-    weight = METHOD_WEIGHTS.get(name, 1.0)
+    name, weight = "Bass Analysis", METHOD_WEIGHTS.get("Bass Analysis", 1.0)
 
-    def detect(self) -> MethodResult:
+    def detect(self):
         try:
-            bass_energy = np.mean(self.features.bass_chroma, axis=1);
-            tonic_idx = int(np.argmax(bass_energy))
-            score = bass_energy[tonic_idx] + 0.5 * bass_energy[(tonic_idx + 7) % 12]
-            mode = 'Major' if bass_energy[(tonic_idx + 4) % 12] > bass_energy[(tonic_idx + 3) % 12] else 'Minor'
-            return self.result(tonic_idx, mode, score, min(1.0, (score / (np.max(bass_energy) + 1e-10)) * 1.2))
+            be = np.mean(self.features.bass_chroma, axis=1);
+            ti = int(np.argmax(be))
+            sc = be[ti] + 0.5 * be[(ti + 7) % 12]
+            m = 'Major' if be[(ti + 4) % 12] > be[(ti + 3) % 12] else 'Minor'
+            return self.result(ti, m, sc, min(1.0, (sc / (np.max(be) + 1e-10)) * 1.2))
         except Exception as e:
-            return {'method': self.name, 'error': f'Bass analysis failed: {e}'}
+            return {'method': self.name, 'error': str(e)}
 
 
 class BoundariesMethod(KeyMethod):
-    name = "Track Boundaries";
-    weight = METHOD_WEIGHTS.get(name, 1.0)
+    name, weight = "Track Boundaries", METHOD_WEIGHTS.get("Track Boundaries", 1.0)
 
-    def detect(self) -> MethodResult:
-        window = min(10, self.features.duration * 0.1)
-        if window < 0.5: return {'method': self.name, 'error': 'Track too short'}
-        samples_frames = librosa.time_to_frames(window, sr=self.features.sr)
-        if samples_frames * 2 >= self.features.chroma.shape[1]: samples_frames = self.features.chroma.shape[1] // 4
-        boundary_chroma = (np.mean(self.features.chroma[:, :samples_frames], axis=1) + np.mean(
-            self.features.chroma[:, -samples_frames:], axis=1)) / 2
-        boundary_chroma -= np.mean(boundary_chroma);
-        tonic_idx = int(np.argmax(boundary_chroma))
-        major_energy = boundary_chroma[(tonic_idx + 4) % 12];
-        minor_energy = boundary_chroma[(tonic_idx + 3) % 12]
-        mode = 'Major' if major_energy > minor_energy else 'Minor'
-        return self.result(tonic_idx, mode, boundary_chroma[tonic_idx], min(1.0, abs(major_energy - minor_energy) / (
-                abs(major_energy) + abs(minor_energy) + 1e-10) * 2))
+    def detect(self):
+        w = min(10, self.features.duration * 0.1)
+        if w < 0.5: return {'method': self.name, 'error': 'Track too short'}
+        sf = librosa.time_to_frames(w, sr=self.features.sr)
+        if sf * 2 >= self.features.chroma.shape[1]: sf = self.features.chroma.shape[1] // 4
+        bc = (np.mean(self.features.chroma[:, :sf], axis=1) + np.mean(self.features.chroma[:, -sf:], axis=1)) / 2
+        bc -= np.mean(bc);
+        ti = int(np.argmax(bc))
+        me, mn = bc[(ti + 4) % 12], bc[(ti + 3) % 12]
+        return self.result(ti, 'Major' if me > mn else 'Minor', bc[ti],
+                           min(1.0, abs(me - mn) / (abs(me) + abs(mn) + 1e-10) * 2))
 
 
 class ChordVotingMethod(KeyMethod):
-    name = "Chord Voting";
-    weight = METHOD_WEIGHTS.get(name, 1.0)
+    name, weight = "Chord Voting", METHOD_WEIGHTS.get("Chord Voting", 1.0)
 
-    def detect(self) -> MethodResult:
+    def detect(self):
         if len(self.features.beat_frames) < 8: return {'method': self.name, 'error': 'Not enough beats'}
         step = 4 if len(self.features.beat_frames) > 16 else 2
-        tonic_votes = np.zeros(12, dtype=int);
-        mode_votes = {'Major': 0, 'Minor': 0}
+        tv, mv = np.zeros(12, dtype=int), {'Major': 0, 'Minor': 0}
         for i in range(0, len(self.features.beat_frames) - step, step):
-            start_frame = self.features.beat_frames[i];
-            end_frame = min(self.features.beat_frames[i + step], self.features.chroma.shape[1])
-            if start_frame >= end_frame: continue
-            avg_chroma = np.mean(self.features.chroma[:, start_frame:end_frame], axis=1)
-            pitch_idx = int(np.argmax(avg_chroma));
-            tonic_votes[pitch_idx] += 1
-            third_major = avg_chroma[(pitch_idx + 4) % 12];
-            third_minor = avg_chroma[(pitch_idx + 3) % 12];
-            fifth = avg_chroma[(pitch_idx + 7) % 12]
-            if third_major > third_minor and fifth > 0.3 * avg_chroma[pitch_idx]:
-                mode_votes['Major'] += 1
-            elif third_minor > third_major and fifth > 0.3 * avg_chroma[pitch_idx]:
-                mode_votes['Minor'] += 1
+            s, e = self.features.beat_frames[i], min(self.features.beat_frames[i + step], self.features.chroma.shape[1])
+            if s >= e: continue
+            ac = np.mean(self.features.chroma[:, s:e], axis=1);
+            pi = int(np.argmax(ac))
+            tv[pi] += 1
+            tm, tmn, f = ac[(pi + 4) % 12], ac[(pi + 3) % 12], ac[(pi + 7) % 12]
+            if tm > tmn and f > 0.3 * ac[pi]:
+                mv['Major'] += 1
+            elif tmn > tm and f > 0.3 * ac[pi]:
+                mv['Minor'] += 1
             else:
-                mode_votes['Major' if third_major > third_minor else 'Minor'] += 1
-        if np.sum(tonic_votes) == 0: return {'method': self.name, 'error': 'No votes'}
-        most_common = int(np.argmax(tonic_votes));
-        mode = 'Major' if mode_votes['Major'] >= mode_votes['Minor'] else 'Minor'
-        return self.result(most_common, mode, tonic_votes[most_common] / np.sum(tonic_votes),
-                           mode_votes[mode] / (mode_votes['Major'] + mode_votes['Minor'] + 1e-10))
+                mv['Major' if tm > tmn else 'Minor'] += 1
+        if np.sum(tv) == 0: return {'method': self.name, 'error': 'No votes'}
+        mc = int(np.argmax(tv));
+        m = 'Major' if mv['Major'] >= mv['Minor'] else 'Minor'
+        return self.result(mc, m, tv[mc] / np.sum(tv), mv[m] / (mv['Major'] + mv['Minor'] + 1e-10))
 
 
 class CircleOfFifthsMethod(KeyMethod):
-    name = "Circle of Fifths";
-    weight = METHOD_WEIGHTS.get(name, 1.0)
+    name, weight = "Circle of Fifths", METHOD_WEIGHTS.get("Circle of Fifths", 1.0)
 
-    def detect(self) -> MethodResult:
-        avg = self.chroma_avg;
-        indices = np.arange(12)
-        major_scores = avg[indices] * 2.0 + avg[(indices + 7) % 12] * 1.5 + avg[(indices + 5) % 12] * 1.0
-        minor_scores = avg[indices] * 2.0 + avg[(indices + 7) % 12] * 1.5 + avg[(indices + 3) % 12] * 1.0
-        best_maj_idx = int(np.argmax(major_scores));
-        best_min_idx = int(np.argmax(minor_scores))
-        if major_scores[best_maj_idx] > minor_scores[best_min_idx]:
-            return self.result(best_maj_idx, 'Major', major_scores[best_maj_idx],
-                               min(1.0, major_scores[best_maj_idx] / (np.max(avg) * 3 + 1e-10)))
-        else:
-            return self.result(best_min_idx, 'Minor', minor_scores[best_min_idx],
-                               min(1.0, minor_scores[best_min_idx] / (np.max(avg) * 3 + 1e-10)))
+    def detect(self):
+        avg, idx = self.chroma_avg, np.arange(12)
+        ms = avg[idx] * 2.0 + avg[(idx + 7) % 12] * 1.5 + avg[(idx + 5) % 12]
+        mns = avg[idx] * 2.0 + avg[(idx + 7) % 12] * 1.5 + avg[(idx + 3) % 12]
+        bmi, bmi2 = int(np.argmax(ms)), int(np.argmax(mns))
+        if ms[bmi] > mns[bmi2]: return self.result(bmi, 'Major', ms[bmi], min(1.0, ms[bmi] / (np.max(avg) * 3 + 1e-10)))
+        return self.result(bmi2, 'Minor', mns[bmi2], min(1.0, mns[bmi2] / (np.max(avg) * 3 + 1e-10)))
 
 
 class SpectralMethod(KeyMethod):
-    name = "Spectral Analysis";
-    weight = METHOD_WEIGHTS.get(name, 1.0)
+    name, weight = "Spectral Analysis", METHOD_WEIGHTS.get("Spectral Analysis", 1.0)
 
-    def detect(self) -> MethodResult:
+    def detect(self):
         avg = self.chroma_avg;
-        tonic_idx = int(np.argmax(avg))
-        third_diff = avg[(tonic_idx + 4) % 12] - avg[(tonic_idx + 3) % 12]
-        mean_centroid = np.mean(self.features.spectral_centroid) if self.features.spectral_centroid is not None else 0
-        mean_contrast = np.mean(self.features.spectral_contrast[1:]) if self.features.spectral_contrast is not None and \
-                                                                        self.features.spectral_contrast.shape[
-                                                                            0] > 1 else 0
-        if mean_centroid > 1500 and mean_contrast > 0.5:
-            mode = 'Major' if third_diff > 0 else 'Minor'
-        else:
-            mode = 'Minor' if third_diff < 0 else 'Major'
-        return self.result(tonic_idx, mode, avg[tonic_idx], min(1.0, abs(third_diff) * 3 + 0.2))
+        ti = int(np.argmax(avg));
+        td = avg[(ti + 4) % 12] - avg[(ti + 3) % 12]
+        mc = np.mean(self.features.spectral_centroid) if self.features.spectral_centroid is not None else 0
+        mct = np.mean(self.features.spectral_contrast[1:]) if self.features.spectral_contrast is not None and \
+                                                              self.features.spectral_contrast.shape[0] > 1 else 0
+        m = ('Major' if td > 0 else 'Minor') if mc > 1500 and mct > 0.5 else ('Minor' if td < 0 else 'Major')
+        return self.result(ti, m, avg[ti], min(1.0, abs(td) * 3 + 0.2))
 
 
 class EssentiaMethod(KeyMethod):
-    name = "Essentia";
-    weight = METHOD_WEIGHTS.get(name, 1.0)
+    name, weight = "Essentia", METHOD_WEIGHTS.get("Essentia", 1.0)
 
-    def detect(self) -> MethodResult:
+    def detect(self):
+        if not ESSENTIA_AVAILABLE: return {'method': self.name, 'error': 'Essentia not installed'}
         try:
             audio = self.features.y.astype(np.float32);
-            profiles = ['temperley', 'krumhansl', 'edma']
-            best_result = None;
-            best_strength = 0.0
-            for profile in profiles:
+            br, bs = None, 0.0
+            for p in ['temperley', 'krumhansl', 'edma']:
                 try:
-                    key, scale, strength = es.KeyExtractor(profileType=profile)(audio)
-                    if strength > best_strength and key and scale: best_strength = strength; best_result = (key, scale,
-                                                                                                            strength)
-                except Exception:
+                    k, s, st = es.KeyExtractor(profileType=p)(audio)
+                    if st > bs and k and s: bs, br = st, (k, s, st)
+                except:
                     continue
-            if not best_result: return {'method': self.name, 'error': 'Key extraction failed'}
-            key, scale, strength = best_result;
-            mode = scale.capitalize();
-            key_norm = normalize_key(key)
-            if key_norm not in PITCH_CLASS_MAP: return {'method': self.name, 'error': f'Unknown key: {key}'}
-            return self.result(PITCH_CLASS_MAP[key_norm], mode, strength, strength)
+            if not br: return {'method': self.name, 'error': 'Failed'}
+            k, s, st = br;
+            kn = normalize_key(k)
+            if kn not in PITCH_CLASS_MAP: return {'method': self.name, 'error': f'Unknown key: {k}'}
+            return self.result(PITCH_CLASS_MAP[kn], s.capitalize(), st, st)
         except Exception as e:
             return {'method': self.name, 'error': str(e)}
 
@@ -424,97 +450,144 @@ class EssentiaMethod(KeyMethod):
 # ==================== BPM ====================
 class BPMDetector:
     @staticmethod
-    def _autocorrelate_bpm_fft(signal: np.ndarray, sr: int, min_bpm: int = 40, max_bpm: int = 220) -> float | None:
-        if len(signal) < sr * 2: return None
+    def _autocorrelate_bpm_fft(signal, sr, min_bpm=40, max_bpm=220, max_duration_sec=60, hop_length=512):
+        max_frames = int(max_duration_sec * sr / hop_length)
+        if len(signal) > max_frames: signal = signal[:max_frames]
+        min_frames = int(2 * sr / hop_length)
+        if len(signal) < min_frames: return None
         signal = signal - np.mean(signal);
         n = len(signal);
-        fast_n = next_fast_len(2 * n)
-        fft_autocorr = ifft(fft(signal, n=fast_n) * np.conj(fft(signal, n=fast_n)));
-        autocorr = np.real(fft_autocorr[:n])
-        min_lag = int(60 * sr / max_bpm);
-        max_lag = int(60 * sr / min_bpm)
-        if max_lag >= len(autocorr) or min_lag >= max_lag: return None
-        search = autocorr[min_lag:max_lag]
-        if len(search) == 0: return None
-        bpm = 60 * sr / (np.argmax(search) + min_lag)
+        fn = next_fast_len(2 * n)
+        fa = ifft(fft(signal, n=fn) * np.conj(fft(signal, n=fn)));
+        ac = np.real(fa[:n])
+        min_lag_frames = int(60 * sr / max_bpm / hop_length)
+        max_lag_frames = int(60 * sr / min_bpm / hop_length)
+        if max_lag_frames >= len(ac) or min_lag_frames >= max_lag_frames: return None
+        search_range = ac[min_lag_frames:max_lag_frames]
+        if len(search_range) == 0: return None
+        best_lag_frames = np.argmax(search_range) + min_lag_frames
+        bpm = 60 * sr / (best_lag_frames * hop_length)
         return float(bpm) if min_bpm < bpm < max_bpm else None
 
     @staticmethod
-    def detect(features: AudioFeatures, config: AnalysisConfig) -> dict:
+    def detect(features, config):
         results = {};
-        y = features.y_perc;
-        sr = features.sr
+        y, sr = features.y_perc, features.sr
         if features.tempo: results['librosa'] = float(features.tempo)
         try:
-            bpm = BPMDetector._autocorrelate_bpm_fft(np.mean(np.abs(librosa.stft(y)), axis=0), sr, config.bpm_min,
-                                                     config.bpm_max)
-            if bpm: results['autocorrelation'] = bpm
-            spectral_flux = np.maximum(np.diff(np.mean(np.abs(librosa.stft(y)), axis=0)), 0)
-            bpm = BPMDetector._autocorrelate_bpm_fft(spectral_flux, sr, config.bpm_min, config.bpm_max)
-            if bpm: results['spectral_flux'] = bpm
-            bpm = BPMDetector._autocorrelate_bpm_fft(features.onset_env, sr, config.bpm_min, config.bpm_max)
-            if bpm: results['onset'] = bpm
-        except Exception:
+            for sig in [np.mean(np.abs(librosa.stft(y)), axis=0),
+                        np.maximum(np.diff(np.mean(np.abs(librosa.stft(y)), axis=0)), 0), features.onset_env]:
+                bpm = BPMDetector._autocorrelate_bpm_fft(sig, sr, config.bpm_min, config.bpm_max,
+                                                         config.max_autocorr_duration, hop_length=512)
+                if bpm: results['auto'] = bpm
+        except:
             pass
         if results:
-            values = list(results.values());
-            median = np.median(values)
-            filtered = {k: v for k, v in results.items() if abs(v - median) / median < 0.15}
-            return filtered if filtered else results
+            v = list(results.values());
+            m = np.median(v)
+            f = {k: val for k, val in results.items() if abs(val - m) / (m + 1e-10) < 0.15}
+            return f if f else results
         return {}
 
 
-# ==================== АНАЛИЗАТОРЫ СТРУКТУРЫ, РИТМА, ВОКАЛА, АККОРДОВ, ДИНАМИКИ ====================
+# ==================== АНАЛИЗАТОРЫ ====================
 class SectionAnalyzer:
-    def __init__(self, features: AudioFeatures):
-        self.features = features
+    def __init__(self, features: AudioFeatures, config: AnalysisConfig):
+        self.features, self.config = features, config
 
     def analyze(self) -> dict:
-        if not SKLEARN_AVAILABLE: return {'error': 'scikit-learn не установлен', 'sections': []}
         try:
-            chroma = self.features.chroma;
-            sr = self.features.sr;
-            hop_length = 512
-            segment_frames = int(2 * sr / hop_length)
-            if segment_frames >= chroma.shape[1]: return {'sections': [], 'structure_map': 'Too short',
-                                                          'chorus_count': 0}
-            segments = [];
-            times = []
-            for i in range(0, chroma.shape[1] - segment_frames, segment_frames):
-                segments.append(np.mean(chroma[:, i:i + segment_frames], axis=1))
-                times.append((librosa.frames_to_time(i, sr=sr, hop_length=hop_length),
-                              librosa.frames_to_time(i + segment_frames, sr=sr, hop_length=hop_length)))
-            if len(segments) < 3: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
-            segments = np.array(segments);
-            labels = KMeans(n_clusters=min(6, len(segments)), random_state=42, n_init='auto').fit_predict(segments)
-            all_seg_energies = np.array([np.sum(s) for s in segments]);
-            p70 = np.percentile(all_seg_energies, 70);
-            p30 = np.percentile(all_seg_energies, 30)
-            sections = [];
-            current_label = labels[0];
-            current_start = times[0][0]
+            c, sr, hl, d = self.features.chroma, self.features.sr, 512, self.features.duration
+
+            # ИСПРАВЛЕНИЕ v6.5.0: Добавляем RMS, Centroid, ZCR для KMeans, чтобы различать куплет и припев с одинаковыми аккордами
+            rms_frames = librosa.feature.rms(y=self.features.y)[0]
+            centroid_frames = self.features.spectral_centroid[
+                0] if self.features.spectral_centroid is not None else np.zeros_like(rms_frames)
+            zcr_frames = self.features.zero_crossing_rate[
+                0] if self.features.zero_crossing_rate is not None else np.zeros_like(rms_frames)
+
+            min_len = min(c.shape[1], rms_frames.shape[0], centroid_frames.shape[0], zcr_frames.shape[0])
+            c = c[:, :min_len]
+            rms_frames = rms_frames[:min_len]
+            centroid_frames = centroid_frames[:min_len]
+            zcr_frames = zcr_frames[:min_len]
+
+            rms_norm = (rms_frames - np.min(rms_frames)) / (np.max(rms_frames) - np.min(rms_frames) + 1e-10)
+            cent_norm = (centroid_frames - np.min(centroid_frames)) / (
+                    np.max(centroid_frames) - np.min(centroid_frames) + 1e-10)
+            zcr_norm = (zcr_frames - np.min(zcr_frames)) / (np.max(zcr_frames) - np.min(zcr_frames) + 1e-10)
+
+            sf = int(self.config.segment_duration_sec * sr / hl)
+            if sf >= c.shape[1]: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
+            segs, times = [], []
+            for i in range(0, c.shape[1] - sf, sf):
+                seg_chroma = np.mean(c[:, i:i + sf], axis=1)
+                seg_rms = np.mean(rms_norm[i:i + sf])
+                seg_cent = np.mean(cent_norm[i:i + sf])
+                seg_zcr = np.mean(zcr_norm[i:i + sf])
+                segs.append(np.concatenate([seg_chroma, [seg_rms, seg_cent, seg_zcr]]))
+                times.append((librosa.frames_to_time(i, sr=sr, hop_length=hl),
+                              librosa.frames_to_time(i + sf, sr=sr, hop_length=hl)))
+            if len(segs) < 3: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
+
+            labels = medfilt(
+                KMeans(n_clusters=min(5, len(segs)), random_state=42, n_init='auto').fit_predict(np.array(segs)),
+                kernel_size=3).astype(int)
+            rl = {l for l, cnt in Counter(labels).items() if cnt >= 2}
+
+            # Энергия для определения припева (используем только RMS из сегмента, индекс 12)
+            en = np.array([s[12] for s in segs])
+            p70, p30 = np.percentile(en, 70), np.percentile(en, 30)
+            raw, cl, cs, ces, cec = [], labels[0], times[0][0], en[0], 1
             for i in range(1, len(labels)):
-                if labels[i] != current_label or i == len(labels) - 1:
-                    current_end = times[i - 1][1] if labels[i] != current_label else times[i][1]
-                    seg_energy = np.mean(
-                        [all_seg_energies[j] for j in range(len(labels)) if labels[j] == current_label])
-                    if current_start < 5:
-                        label = "Intro"
-                    elif current_end > self.features.duration - 5:
-                        label = "Outro"
-                    elif seg_energy > p70:
-                        label = "Chorus"
-                    elif seg_energy < p30:
-                        label = "Bridge"
+                if labels[i] != cl or i == len(labels) - 1:
+                    ce = times[i - 1][1] if labels[i] != cl else times[i][1]
+                    se = ces / cec;
+                    ir = cl in rl
+                    if cs < 8:
+                        l = "Intro"
+                    elif ce > d - 8:
+                        l = "Outro"
+                    elif ir and se > p70:
+                        l = "Chorus"
+                    elif ir and se < p30:
+                        l = "Bridge"
+                    elif se < p30:
+                        l = "Breakdown"
                     else:
-                        label = "Verse"
-                    sections.append(
-                        {'label': label, 'start_time': round(current_start, 2), 'end_time': round(current_end, 2),
-                         'duration': round(current_end - current_start, 2)})
-                    current_label = labels[i];
-                    current_start = times[i][0]
-            return {'sections': sections, 'structure_map': " → ".join([s['label'] for s in sections]),
-                    'chorus_count': sum(1 for s in sections if s['label'] == "Chorus"), 'total_sections': len(sections)}
+                        l = "Verse"
+                    raw.append({'label': l, 'start_time': round(cs, 2), 'end_time': round(ce, 2),
+                                'duration': round(ce - cs, 2), 'cluster_id': int(cl), 'energy': round(float(se), 2)})
+                    cl, cs, ces, cec = labels[i], times[i][0], en[i], 1
+                else:
+                    ces += en[i]; cec += 1
+            merged, ms2 = [], self.config.min_section_duration
+            for s in raw:
+                if not merged:
+                    merged.append(s.copy())
+                else:
+                    la = merged[-1]
+                    if s['duration'] < 8 or (s['duration'] < ms2 and la['label'] == s['label']):
+                        la['end_time'], la['duration'] = s['end_time'], round(s['end_time'] - la['start_time'], 2)
+                    else:
+                        merged.append(s.copy())
+            fs = []
+            for s in merged:
+                if s['duration'] > 32.0 and fs:
+                    sp = s['start_time'] + 32.0
+                    fs.extend([{'label': s['label'], 'start_time': s['start_time'], 'end_time': sp, 'duration': 32.0,
+                                'cluster_id': s.get('cluster_id', -1), 'energy': s['energy']},
+                               {'label': s['label'], 'start_time': sp, 'end_time': s['end_time'],
+                                'duration': round(s['end_time'] - sp, 2), 'cluster_id': s.get('cluster_id', -1),
+                                'energy': s['energy']}])
+                else:
+                    fs.append(s)
+            be = self.features.tempo if self.features.tempo > 0 else 120;
+            bs = 60.0 / be
+            for s in fs: b = s['duration'] / bs; s['estimated_bars'], s['estimated_beats'] = round(b / 4.0, 1), round(b,
+                                                                                                                      1)
+            return {'sections': fs, 'structure_map': " → ".join([s['label'] for s in fs]),
+                    'chorus_count': sum(1 for s in fs if s['label'] == "Chorus"), 'total_sections': len(fs)}
         except Exception as e:
             return {'error': str(e), 'sections': []}
 
@@ -527,75 +600,30 @@ class RhythmAnalyzer:
         try:
             if self.features.tempo <= 0 or len(self.features.beat_frames) < 4: return {
                 'error': 'Cannot determine rhythm'}
-            beat_times = librosa.frames_to_time(self.features.beat_frames, sr=self.features.sr)
-            if len(beat_times) > 1:
-                intervals = np.diff(beat_times);
-                median_interval = np.median(intervals);
-                interval_variance = np.var(intervals) / (median_interval ** 2)
-                meter = "4/4" if interval_variance < 0.01 else "3/4" if interval_variance < 0.02 else "6/8" if interval_variance < 0.03 else "Free"
+            bt = librosa.frames_to_time(self.features.beat_frames, sr=self.features.sr);
+            iv = np.diff(bt)
+            mi, iv2 = np.median(iv), np.var(iv) / (np.median(iv) ** 2)
+            if len(self.features.beat_frames) > 4:
+                be = [self.features.onset_env[min(b, len(self.features.onset_env) - 1)] for b in
+                      self.features.beat_frames]
+                sc = {}
+                for gs in [2, 3, 4]:
+                    g = [be[i:i + gs] for i in range(0, len(be) - len(be) % gs, gs)]
+                    if g: sc[gs] = np.mean([x[0] for x in g]) / (
+                            np.mean([np.mean(x[1:]) for x in g if len(x) > 1]) + 1e-10)
+                b = max(sc, key=sc.get)
+                m = f"{b}/4" if b in [2, 4] else "3/4" if b == 3 else "4/4" if sc[b] <= 1.2 else "Free"
             else:
-                meter = "Unknown"; interval_variance = 0
-            regularity = max(0, 1 - interval_variance * 10) if len(beat_times) > 1 else 0
-            beat_strength = np.mean([self.features.onset_env[min(b, len(self.features.onset_env) - 1)] for b in
-                                     self.features.beat_frames]) if len(self.features.beat_frames) > 2 else 0
-            syncopation = max(0, 1 - (beat_strength / (np.mean(self.features.onset_env) + 1e-10))) if len(
-                self.features.beat_frames) > 2 else 0
-            return {'tempo_bpm': round(float(self.features.tempo), 1), 'meter': meter,
-                    'beat_count': len(self.features.beat_frames), 'regularity': round(float(regularity), 3),
-                    'syncopation': round(float(syncopation), 3)}
-        except Exception as e:
-            return {'error': str(e)}
+                m = "4/4" if iv2 < 0.01 else "Free"
 
+            # ИСПРАВЛЕНИЕ v6.5.0: Конвертация 2/4 в 4/4 для рока/поп-музыки
+            if m == "2/4" and self.features.tempo < 160: m = "4/4"
 
-class VocalAnalyzer:
-    _whisper_model_cache: dict = {}
-
-    def __init__(self, features: AudioFeatures, use_whisper: bool = False, whisper_model: str = "base"):
-        self.features = features; self.use_whisper = use_whisper and whisper_available and SOUNDFILE_AVAILABLE; self.whisper_model_name = whisper_model
-
-    def _get_whisper_model(self):
-        if self.whisper_model_name not in self._whisper_model_cache: self._whisper_model_cache[
-            self.whisper_model_name] = whisper.load_model(self.whisper_model_name)
-        return self._whisper_model_cache[self.whisper_model_name]
-
-    def analyze(self) -> dict:
-        try:
-            S = np.abs(librosa.stft(self.features.y));
-            freqs = librosa.fft_frequencies(sr=self.features.sr);
-            hop_length = 512
-            vocal_band = (freqs >= 200) & (freqs <= 2000);
-            vocal_ratio = np.mean(S[vocal_band, :], axis=0) / (np.mean(S, axis=0) + 1e-10)
-            vocal_segments = [];
-            threshold = 0.3;
-            in_vocal = False;
-            start_time = 0
-            for i, ratio in enumerate(vocal_ratio):
-                time = librosa.frames_to_time(i, sr=self.features.sr, hop_length=hop_length)
-                if ratio > threshold and not in_vocal:
-                    in_vocal = True; start_time = time
-                elif ratio <= threshold and in_vocal:
-                    in_vocal = False
-                    if time - start_time > 0.5: vocal_segments.append(
-                        {'start': round(start_time, 2), 'end': round(time, 2), 'duration': round(time - start_time, 2)})
-            result = {'vocal_presence_percent': round(float(np.mean(vocal_ratio > 0.3) * 100), 1),
-                      'vocal_segments': vocal_segments, 'vocal_segments_count': len(vocal_segments)}
-            if self.use_whisper:
-                try:
-                    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-                        sf.write(tmp.name, self.features.y, self.features.sr);
-                        transcription = self._get_whisper_model().transcribe(tmp.name)
-                    Path(tmp.name).unlink(missing_ok=True);
-                    text = transcription.get("text", "")
-                    words = text.lower().split();
-                    phrase_counter = Counter()
-                    for n in [2, 3]:
-                        for i in range(len(words) - n + 1): phrase_counter[" ".join(words[i:i + n])] += 1
-                    result.update({'transcription': text[:500], 'language': transcription.get("language", "unknown"),
-                                   'repeated_phrases': [{'phrase': p, 'count': c} for p, c in
-                                                        phrase_counter.most_common(10) if c > 1]})
-                except Exception as e:
-                    result['whisper_error'] = str(e)
-            return result
+            return {'tempo_bpm': round(float(self.features.tempo), 1), 'meter': m,
+                    'beat_count': len(self.features.beat_frames), 'regularity': round(float(max(0, 1 - iv2 * 10)), 3),
+                    'syncopation': round(float(max(0, 1 - (np.mean(
+                        [self.features.onset_env[min(b, len(self.features.onset_env) - 1)] for b in
+                         self.features.beat_frames]) / (np.mean(self.features.onset_env) + 1e-10)))), 3)}
         except Exception as e:
             return {'error': str(e)}
 
@@ -606,34 +634,27 @@ class ChordAnalyzer:
 
     def analyze(self) -> dict:
         try:
-            audio = self.features.y.astype(np.float32);
-            sr = int(self.features.sr);
-            hop_size = 512;
-            frame_size = 4096
-            frame_generator = es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size)
-            windowing = es.Windowing(type='blackmanharris62');
-            spectrum = es.Spectrum()
-            spectral_peaks = es.SpectralPeaks(maxFrequency=5000.0, magnitudeThreshold=0.00001, minFrequency=40.0)
-            hpcp_extractor = es.HPCP(sampleRate=sr, minFrequency=40.0, maxFrequency=5000.0)
-            hpcp_list = [hpcp_extractor(*spectral_peaks(spectrum(windowing(frame)))) for frame in frame_generator]
-            if not hpcp_list: return {'error': 'No HPCP extracted'}
-            chords, _ = es.ChordsDetection()(np.array(hpcp_list))
-            chord_progression = [];
-            current_chord = None;
-            current_start_time = 0.0
-            for i, chord in enumerate(chords):
-                time = i * hop_size / sr
-                if chord != current_chord:
-                    if current_chord is not None: chord_progression.append(
-                        {'chord': str(current_chord), 'start_time': round(float(current_start_time), 2),
-                         'end_time': round(float(time), 2)})
-                    current_chord = chord;
-                    current_start_time = time
-            if current_chord is not None: chord_progression.append(
-                {'chord': str(current_chord), 'start_time': round(float(current_start_time), 2),
-                 'end_time': round(float(len(chords) * hop_size / sr), 2)})
-            return {'method': 'Essentia', 'chords': chord_progression, 'chord_count': len(chord_progression),
-                    'progression': " - ".join([c['chord'] for c in chord_progression[:8]])}
+            maj_prof = np.array([1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0])
+            min_prof = np.array([1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0])
+            chords = []
+            if len(self.features.beat_frames) < 8: return {'chord_progression': [], 'total_chords': 0}
+            step = 4
+            for i in range(0, len(self.features.beat_frames) - step, step):
+                s = self.features.beat_frames[i];
+                e = self.features.beat_frames[min(i + step, len(self.features.beat_frames) - 1)]
+                if s >= e or e > self.features.chroma.shape[1]: continue
+                c_vec = np.mean(self.features.chroma[:, s:e], axis=1)
+                c_vec = c_vec / (np.max(c_vec) + 1e-10)
+                scores = []
+                for root in range(12):
+                    scores.append((NOTE_NAMES[root], 'Major', np.dot(np.roll(maj_prof, root), c_vec)))
+                    scores.append((NOTE_NAMES[root], 'Minor', np.dot(np.roll(min_prof, root), c_vec)))
+                best = max(scores, key=lambda x: x[2])
+                chords.append({'chord': f"{best[0]}{'m' if best[1] == 'Minor' else ''}",
+                               'start_time': round(float(librosa.frames_to_time(s, sr=self.features.sr)), 2),
+                               'end_time': round(float(librosa.frames_to_time(e, sr=self.features.sr)), 2),
+                               'confidence': round(float(best[2]), 2)})
+            return {'chord_progression': chords, 'total_chords': len(chords)}
         except Exception as e:
             return {'error': str(e)}
 
@@ -644,427 +665,447 @@ class DynamicsAnalyzer:
 
     def analyze(self) -> dict:
         try:
-            sr = self.features.sr;
-            hop_length = 512;
-            rms_db = librosa.amplitude_to_db(librosa.feature.rms(y=self.features.y, hop_length=hop_length)[0],
-                                             ref=np.max)
-            max_db = np.max(rms_db);
-            min_db = np.percentile(rms_db, 5)
-            loud_segments = [];
-            quiet_segments = [];
-            segment_length = int(2 * sr / hop_length)
-            th_loud = np.percentile(rms_db, 70);
-            th_quiet = np.percentile(rms_db, 30)
-            for i in range(0, len(rms_db), segment_length):
-                segment = rms_db[i:i + segment_length]
-                if len(segment) < segment_length // 2: break
-                seg_mean = np.mean(segment);
-                start_time = librosa.frames_to_time(i, sr=sr, hop_length=hop_length);
-                end_time = librosa.frames_to_time(i + len(segment), sr=sr, hop_length=hop_length)
-                if seg_mean > th_loud:
-                    loud_segments.append({'start': round(float(start_time), 2), 'end': round(float(end_time), 2)})
-                elif seg_mean < th_quiet:
-                    quiet_segments.append({'start': round(float(start_time), 2), 'end': round(float(end_time), 2)})
-            return {'dynamic_range_db': round(float(max_db - min_db), 1), 'loud_segments_count': len(loud_segments),
-                    'quiet_segments_count': len(quiet_segments)}
+            rms = librosa.feature.rms(y=self.features.y, sr=self.features.sr)[0]
+            rms_db = librosa.amplitude_to_db(rms, ref=np.max)
+            dynamic_range = float(np.percentile(rms_db, 95) - np.percentile(rms_db, 5))
+            hop = self.features.sr
+            rms_sec = [np.mean(rms[max(0, i * hop - hop // 2):i * hop + hop // 2]) for i in
+                       range(int(self.features.duration))]
+            climax_time = int(np.argmax(rms_sec)) if rms_sec else 0
+            drops = []
+            rms_sec = np.array(rms_sec)
+            for i in range(1, len(rms_sec)):
+                if rms_sec[i - 1] > 0.01 and rms_sec[i] < rms_sec[i - 1] * 0.5: drops.append(i)
+            return {'average_loudness_db': round(float(np.mean(rms_db)), 1),
+                    'dynamic_range_db': round(dynamic_range, 1), 'climax_time_sec': climax_time,
+                    'drops_count': len(drops), 'drops_times_sec': drops[:5]}
         except Exception as e:
             return {'error': str(e)}
 
 
-# ==================== НОВОЕ: АНАЛИЗАТОР ТЕМБРА ====================
+class ContourAnalyzer:
+    def __init__(self, features: AudioFeatures):
+        self.features = features
+
+    def analyze(self) -> dict:
+        try:
+            if len(self.features.beat_frames) < 8: return {'contour': 'unknown'}
+            pitches = []
+            step = 4
+            for i in range(0, len(self.features.beat_frames) - step, step):
+                s = self.features.beat_frames[i];
+                e = self.features.beat_frames[min(i + step, len(self.features.beat_frames) - 1)]
+                if s >= e or e > self.features.chroma.shape[1]: continue
+                c_vec = np.mean(self.features.chroma[:, s:e], axis=1)
+                pitches.append(int(np.argmax(c_vec)))
+            if len(pitches) < 3: return {'contour': 'unknown'}
+            x = np.arange(len(pitches));
+            slope = np.polyfit(x, pitches, 1)[0]
+            if slope > 0.1:
+                contour = "ascending"
+            elif slope < -0.1:
+                contour = "descending"
+            else:
+                contour = "arch/static"
+            return {'contour': contour, 'slope': round(float(slope), 3)}
+        except Exception as e:
+            return {'error': str(e)}
+
+
 class TimbreAnalyzer:
     def __init__(self, features: AudioFeatures):
         self.features = features
 
     def analyze(self) -> dict:
         try:
-            centroid = np.mean(self.features.spectral_centroid) if self.features.spectral_centroid is not None else 0
-            rolloff = np.mean(self.features.spectral_rolloff) if self.features.spectral_rolloff is not None else 0
+            cent = np.mean(self.features.spectral_centroid) if self.features.spectral_centroid is not None else 0
+            if cent < 1000:
+                timbre = "dark/deep"
+            elif cent < 2500:
+                timbre = "warm"
+            elif cent < 4500:
+                timbre = "bright"
+            else:
+                timbre = "harsh/metallic"
+            return {'spectral_centroid_hz': round(float(cent), 1), 'timbre_class': timbre}
+        except Exception as e:
+            return {'error': str(e)}
+
+
+class TextureAnalyzer:
+    def __init__(self, features: AudioFeatures):
+        self.features = features
+
+    def analyze(self) -> dict:
+        try:
             zcr = np.mean(self.features.zero_crossing_rate) if self.features.zero_crossing_rate is not None else 0
-            descriptions = []
-            if centroid < 1500:
-                descriptions.append("Теплый / Темный")
-            elif centroid > 3500:
-                descriptions.append("Яркий / Резкий")
+            contrast = np.mean(self.features.spectral_contrast) if self.features.spectral_contrast is not None else 0
+            if zcr > 0.08:
+                texture = "dense/distorted"
+            elif contrast > 25:
+                texture = "harmonic/clean"
             else:
-                descriptions.append("Сбалансированный")
-            if zcr > 0.15:
-                descriptions.append("Шумный / Перкуссионный")
-            else:
-                descriptions.append("Гармонический / Гладкий")
-            mfcc_avg = np.mean(self.features.mfccs[:5], axis=1) if self.features.mfccs is not None else []
-            return {
-                'spectral_centroid_hz': round(float(centroid), 2), 'spectral_rolloff_hz': round(float(rolloff), 2),
-                'zero_crossing_rate': round(float(zcr), 4), 'timbral_traits': descriptions,
-                'mfcc_profile': [round(float(c), 2) for c in mfcc_avg]
-            }
+                texture = "sparse"
+            return {'avg_zcr': round(float(zcr), 4), 'texture_class': texture}
         except Exception as e:
             return {'error': str(e)}
 
 
-# ==================== НОВОЕ: АНАЛИЗАТОР ЖАНРОВ ====================
-class GenreAnalyzer:
-    def __init__(self, features: AudioFeatures, timbre: dict | None, rhythm: dict | None, bpm: dict | None):
-        self.features = features;
-        self.timbre = timbre or {};
-        self.rhythm = rhythm or {};
-        self.bpm = bpm or {}
+# ==================== АНАЛИЗАТОР ВОКАЛА ====================
+class VocalAnalyzer:
+    _whisper_pipe_cache, _demucs_model_cache = {}, None
+
+    def __init__(self, features: AudioFeatures, config: AnalysisConfig):
+        self.features, self.config = features, config
+        self.use_whisper = config.use_whisper and WHISPER_AVAILABLE
+        self.whisper_model_name, self.vocal_backend = config.whisper_model, config.vocal_backend
+        self._vocal_audio = None
+
+    def _get_whisper_pipe(self):
+        if not WHISPER_AVAILABLE: return None
+        cd = self.config.whisper_cache_dir or os.environ.get("WHISPER_CACHE_DIR")
+        if self.whisper_model_name not in self._whisper_pipe_cache:
+            logger.info(f"🔄 Загрузка Whisper: '{self.whisper_model_name}'")
+            dev = "cuda:0" if torch.cuda.is_available() else "mps" if getattr(torch.backends, "mps",
+                                                                              None) is not None and torch.backends.mps.is_available() else "cpu"
+            td = torch.float16 if dev == "cuda:0" else torch.float32
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(self.whisper_model_name, dtype=td, low_cpu_mem_usage=True,
+                                                              cache_dir=cd).to(dev)
+            proc = AutoProcessor.from_pretrained(self.whisper_model_name, cache_dir=cd)
+            self._whisper_pipe_cache[self.whisper_model_name] = pipeline("automatic-speech-recognition", model=model,
+                                                                         tokenizer=proc.tokenizer,
+                                                                         feature_extractor=proc.feature_extractor,
+                                                                         chunk_length_s=30, batch_size=1, dtype=td,
+                                                                         device=dev, ignore_warning=True,
+                                                                         clean_up_tokenization_spaces=False)
+            logger.info("✅ Whisper загружен.")
+        return self._whisper_pipe_cache[self.whisper_model_name]
+
+    def _get_demucs_model(self):
+        if not DEMUCS_AVAILABLE: return None
+        if self._demucs_model_cache is None: self._demucs_model_cache = pretrained.get_model('htdemucs').eval()
+        return self._demucs_model_cache
+
+    def _detect_vocal_presence(self) -> dict:
+        y, sr = self.features.y, self.features.sr
+
+        def count_contiguous_segments(mask):
+            if len(mask) == 0 or not np.any(mask): return 0
+            padded = np.concatenate(([False], mask, [False]))
+            diffs = np.diff(padded.astype(int))
+            return int(np.sum(diffs == 1))
+
+        if self.vocal_backend != 'demucs' or not DEMUCS_AVAILABLE:
+            y_h, y_p = librosa.effects.hpss(y);
+            self._vocal_audio = y_h
+            win = int(1.0 * sr)
+            h_rms = np.array([np.sqrt(np.mean(y_h[i:i + win] ** 2)) for i in range(0, len(y_h), win)])
+            p_rms = np.array([np.sqrt(np.mean(y_p[i:i + win] ** 2)) for i in range(0, len(y_p), win)])
+            v_thresh = np.percentile(h_rms[h_rms > 0], 15) if np.any(h_rms > 0) else 0.01
+            is_vocal = (h_rms > v_thresh) & (h_rms > p_rms * 0.4)
+            is_inst = (p_rms > 0.01) | ((h_rms > v_thresh) & (p_rms > h_rms * 1.2))
+            return {'method': 'hpss', 'has_vocals': bool(np.any(is_vocal)),
+                    'vocal_rms': float(np.sqrt(np.mean(y_h ** 2))),
+                    'vocal_segments_count': count_contiguous_segments(is_vocal),
+                    'instrument_segments_count': count_contiguous_segments(is_inst)}
+        try:
+            model = self._get_demucs_model();
+            device = 'cpu';
+            model.to(device)
+            y_st = np.stack([y, y]) if y.ndim == 1 else y
+            cs = int(self.config.demucs_chunk_sec * sr);
+            vc = []
+            window_sec = 1.0;
+            window_samples = int(window_sec * sr)
+            vocal_energies = [];
+            inst_energies = []
+            logger.info(f"🎙️ Разделение вокала (чанки по {self.config.demucs_chunk_sec}с на CPU)...")
+            for i in tqdm(range(0, y_st.shape[1], cs), desc="Demucs", leave=False):
+                chunk = torch.from_numpy(y_st[:, i:i + cs]).float().unsqueeze(0)
+                with torch.no_grad():
+                    src = apply_model(model, chunk, device=device, shifts=0, split=False)
+                vocal_chunk = src[0, 3].mean(dim=0).numpy();
+                inst_chunk = src[0, 0:3].mean(dim=0).mean(dim=0).numpy()
+                for w_start in range(0, len(vocal_chunk), window_samples):
+                    w_end = min(w_start + window_samples, len(vocal_chunk))
+                    vocal_energies.append(np.sqrt(np.mean(vocal_chunk[w_start:w_end] ** 2)) if w_end > w_start else 0)
+                    inst_energies.append(np.sqrt(np.mean(inst_chunk[w_start:w_end] ** 2)) if w_end > w_start else 0)
+                vc.append(vocal_chunk);
+                del chunk, src;
+                clear_memory()
+            vocal = np.concatenate(vc);
+            self._vocal_audio = vocal;
+            del vc;
+            clear_memory()
+            vocal_energies = np.array(vocal_energies);
+            inst_energies = np.array(inst_energies)
+            v_thresh = np.percentile(vocal_energies[vocal_energies > 0], 15) if np.any(vocal_energies > 0) else 0.005
+            i_thresh = np.percentile(inst_energies[inst_energies > 0], 15) if np.any(inst_energies > 0) else 0.005
+            is_vocal = (vocal_energies > v_thresh) & (vocal_energies > inst_energies * 0.3)
+            is_inst = (inst_energies > i_thresh) & (inst_energies > vocal_energies * 1.2)
+            return {'method': 'demucs_cpu_chunked', 'has_vocals': bool(np.any(is_vocal)),
+                    'vocal_rms': float(np.sqrt(np.mean(vocal ** 2))),
+                    'vocal_segments_count': int(count_contiguous_segments(is_vocal)),
+                    'instrument_segments_count': int(count_contiguous_segments(is_inst)),
+                    'total_segments_analyzed': len(vocal_energies),
+                    'note': 'CPU chunks used. Optimized for folk/throat singing.'}
+        except Exception as e:
+            logger.error(f"Demucs failed: {e}");
+            y_h, y_p = librosa.effects.hpss(y);
+            self._vocal_audio = y_h
+            return {'method': 'hpss_fallback', 'error': str(e), 'has_vocals': True, 'vocal_segments_count': 1,
+                    'instrument_segments_count': 1}
+
+    def _transcribe_vocals(self) -> dict:
+        if not self.use_whisper or self._vocal_audio is None: return {'text': '', 'language': None, 'error': 'Disabled'}
+        pipe = self._get_whisper_pipe()
+        if not pipe: return {'text': '', 'error': 'No pipe'}
+        try:
+            v16 = librosa.resample(self._vocal_audio, orig_sr=self.features.sr, target_sr=16000)
+            logger.info("📝 Транскрибация...")
+
+            # ИСПРАВЛЕНИЕ v6.5.0: Форсирование монгольского языка при галлюцинациях
+            res_auto = pipe(v16, return_timestamps=True, generate_kwargs={"task": "transcribe"})
+            lang_auto = res_auto.get("language", "unknown")
+            txt_auto = " ".join([c["text"].strip() for c in res_auto.get("chunks", []) if c["text"].strip()])
+            words = txt_auto.split()
+            is_hallucination = False
+            if len(words) > 5 and len(set(words)) / len(words) < 0.3: is_hallucination = True
+
+            if is_hallucination or lang_auto not in ['mn', 'ru', 'en', 'uk', 'be']:
+                logger.info("🇲🇳 Обнаружено горловое пение или неясный язык. Форсируем Монгольский (mn)...")
+                res_mn = pipe(v16, return_timestamps=True, generate_kwargs={"task": "transcribe", "language": "mn"})
+                txt_mn = " ".join([c["text"].strip() for c in res_mn.get("chunks", []) if c["text"].strip()])
+                if len(txt_mn.split()) > len(words) or len(txt_mn) > len(txt_auto):
+                    res, txt, lang = res_mn, txt_mn, "mn"
+                else:
+                    res, txt, lang = res_auto, txt_auto, lang_auto
+            else:
+                res, txt, lang = res_auto, txt_auto, lang_auto
+
+            del v16;
+            clear_memory()
+
+            # СЛОВАРНАЯ СЕТКА С ПРИВЯЗКОЙ К ТАКТАМ
+            chunks = res.get("chunks", [])
+            beat_times = librosa.frames_to_time(self.features.beat_frames, sr=self.features.sr)
+            bar_duration = np.median(np.diff(beat_times)) * 4 if len(beat_times) >= 4 else 4 * (
+                    60.0 / self.features.tempo)
+
+            syllable_grid = []
+            lines = []
+            current_line = {'text': '', 'syllables': 0, 'start_bar': 0, 'end_bar': 0}
+            prev_end = 0.0
+            for c in chunks:
+                text = c.get("text", "").strip()
+                if not text: continue
+                timestamp = c.get("timestamp", (0, 0))
+                start = timestamp[0] if timestamp[0] is not None else prev_end
+                end = timestamp[1] if timestamp[1] is not None else start + 1.0
+
+                start_bar = round(start / bar_duration)
+                end_bar = round(end / bar_duration)
+
+                pause_duration = start - prev_end
+                if pause_duration > 1.2 and current_line['syllables'] > 0:
+                    lines.append(current_line)
+                    current_line = {'text': text, 'syllables': get_syllables(text, lang), 'start_bar': start_bar,
+                                    'end_bar': end_bar}
+                else:
+                    current_line['text'] += (" " if current_line['text'] else "") + text
+                    current_line['syllables'] += get_syllables(text, lang)
+                    current_line['end_bar'] = end_bar
+
+                syllable_grid.append({'text': text, 'syllables': get_syllables(text, lang), 'start': round(start, 2),
+                                      'end': round(end, 2), 'bars': end_bar - start_bar})
+                prev_end = end
+            if current_line['syllables'] > 0: lines.append(current_line)
+
+            meter_info = "Не определена"
+            avg_syllables = 0
+            if lines:
+                syl_counts = [l['syllables'] for l in lines if l['syllables'] >= 3]
+                if syl_counts:
+                    avg_syllables = np.mean(syl_counts)
+                    common_meters = [6, 8, 10, 11, 12, 14]
+                    best_meter = min(common_meters, key=lambda x: abs(x - avg_syllables))
+                    meter_info = f"~{best_meter} слогов (среднее {avg_syllables:.1f})"
+
+            throat_singing_likely = is_hallucination or (
+                    not txt and self._vocal_audio is not None and np.sqrt(np.mean(self._vocal_audio ** 2)) > 0.01)
+
+            return {'text': txt, 'language': lang, 'word_count': len(txt.split()),
+                    'syllable_count': get_syllables(txt, lang), 'chunks_count': len(chunks),
+                    'is_hallucination': is_hallucination, 'syllable_grid': syllable_grid, 'lines': lines,
+                    'meter': meter_info, 'avg_syllables_per_line': round(avg_syllables, 1),
+                    'throat_singing_likely': throat_singing_likely, 'bar_duration_sec': round(float(bar_duration), 2)}
+        except Exception as e:
+            return {'text': '', 'error': str(e)}
 
     def analyze(self) -> dict:
-        try:
-            tempo = self.bpm.get('rounded', 0);
-            centroid = self.timbre.get('spectral_centroid_hz', 2000)
-            zcr = self.timbre.get('zero_crossing_rate', 0.05);
-            regularity = self.rhythm.get('regularity', 0.8)
-            scores = defaultdict(float)
-            if 118 <= tempo <= 135 and regularity > 0.8: scores['EDM / House'] += 3
-            if 135 < tempo <= 150 and regularity > 0.8: scores['Drum & Bass'] += 3
-            if 80 <= tempo <= 105 and zcr > 0.1 and regularity > 0.7: scores['Hip-Hop / Rap'] += 3
-            if 110 <= tempo <= 180 and centroid > 3000 and zcr > 0.1: scores['Rock / Metal'] += 3
-            if 100 <= tempo <= 130 and 2000 < centroid < 3500: scores['Pop'] += 2
-            if regularity < 0.6 and centroid < 2500 and zcr < 0.08: scores['Classical / Orchestral'] += 3
-            if tempo < 80 and centroid < 2000 and regularity < 0.5: scores['Ambient / Chillout'] += 3
-            if not scores: scores['Pop / Mainstream'] += 1
-            sorted_genres = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-            top_genres = [{"genre": g, "score": float(s)} for g, s in sorted_genres[:3]]
-            return {'predicted_genres': top_genres,
-                    'primary_genre': top_genres[0]['genre'] if top_genres else 'Unknown'}
-        except Exception as e:
-            return {'error': str(e)}
+        pr = self._detect_vocal_presence()
+        tr = self._transcribe_vocals() if pr.get('has_vocals', False) else {}
+        return {**pr, **tr}
 
 
-# ==================== НОВОЕ: ИНТЕГРАЦИЯ С НЕЙРОСЕТЬЮ (JSON API) ====================
-class NeuralNetworkAnalyzer:
-    def __init__(self, features: AudioFeatures, config: AnalysisConfig, context: dict):
-        self.features = features;
-        self.api_url = config.neural_api_url;
-        self.context = context
-
-    def _prepare_payload(self) -> dict:
-        chroma_avg = np.mean(self.features.chroma, axis=1).tolist()
-        mfcc_avg = np.mean(self.features.mfccs, axis=1).tolist() if self.features.mfccs is not None else []
-        return {
-            "audio_features": {
-                "duration_sec": float(self.features.duration), "tempo_bpm": self.context.get('bpm', 0),
-                "chroma_avg": [round(float(c), 4) for c in chroma_avg],
-                "mfcc_avg": [round(float(c), 4) for c in mfcc_avg],
-                "spectral_centroid": round(float(np.mean(self.features.spectral_centroid)),
-                                           2) if self.features.spectral_centroid is not None else 0,
-                "zero_crossing_rate": round(float(np.mean(self.features.zero_crossing_rate)),
-                                            4) if self.features.zero_crossing_rate is not None else 0,
-                "rhythm_regularity": self.context.get('rhythm', {}).get('regularity', 0)
-            }, "metadata": {"key": self.context.get('key'), "mode": self.context.get('mode')}
-        }
-
-    def analyze(self) -> dict:
-        if not self.api_url: return {'error': 'No API URL provided'}
-        try:
-            payload = self._prepare_payload()
-            data = json.dumps(payload, cls=NumpyJSONEncoder).encode('utf-8')
-            req = urllib.request.Request(self.api_url, data=data, headers={'Content-Type': 'application/json'},
-                                         method='POST')
-            with urllib.request.urlopen(req, timeout=10) as response:
-                return json.loads(response.read().decode('utf-8'))
-        except urllib.error.URLError as e:
-            logger.warning(f"Neural API connection failed: {e.reason}");
-            return {'error': f'API Connection failed: {e.reason}'}
-        except Exception as e:
-            logger.error(f"Neural API analysis failed: {e}");
-            return {'error': str(e)}
-
-
-# ==================== ОСНОВНОЙ КЛАСС АНАЛИЗАТОРА ====================
-class KeyDetector:
-    def __init__(self, filepath: str, config: AnalysisConfig | None = None):
-        self.filepath = Path(filepath);
+# ==================== ОСНОВНОЙ АНАЛИЗАТОР ====================
+class MusicAnalyzer:
+    def __init__(self, config: AnalysisConfig | None = None):
         self.config = config or AnalysisConfig()
-        self.features: AudioFeatures | None = None;
-        self.methods: list[KeyMethod] = []
-        self.results: list[MethodResult] = [];
-        self.bpm_results: dict = {};
-        self.final_result: ExtendedResult | None = None
 
-    def _load_audio(self) -> tuple[np.ndarray, np.ndarray, int, float]:
+    def _generate_theme_hints(self, res_dict: dict) -> str:
+        hints = []
+        if res_dict.get('timbre', {}).get('timbre_class') == 'dark/deep': hints.append("мрачная, низкая")
+        if res_dict.get('texture', {}).get('texture_class') == 'dense/distorted': hints.append(
+            "агрессивная, эпичная, стена звука")
+        if res_dict.get('dynamics', {}).get('dynamic_range_db', 0) > 15: hints.append(
+            "контрастная, с тихими и взрывными частями")
+        if res_dict.get('rhythm', {}).get('syncopation', 0) > 0.5: hints.append("ритмичная, ломаный грув")
+        if res_dict.get('vocal', {}).get('throat_singing_likely'): hints.extend(
+            ["степь", "горловое пение", "шаманизм", "природа"])
+        if res_dict.get('structure', {}).get('chorus_count', 0) >= 3: hints.append("гимн, хитовая структура")
+        return ", ".join(hints) if hints else "нейтральная, повествовательная"
+
+    def _extract_features(self, file_path: str) -> AudioFeatures:
+        logger.info(f"📂 Загрузка: {file_path}")
+        y, sr = librosa.load(file_path, sr=self.config.sample_rate, mono=True)
+        if self.config.normalize_audio: y = normalize_audio(y)
+        y_h, y_p = librosa.effects.hpss(y)
+        c = librosa.feature.chroma_cqt(y=y_p, sr=sr, bins_per_octave=36)
+        bc = librosa.feature.chroma_cqt(y=y, sr=sr, bins_per_octave=36, fmin=librosa.note_to_hz('C1'), n_octaves=2)
+        t, bf = librosa.beat.beat_track(y=y_p, sr=sr);
+        tempo = float(np.atleast_1d(t).mean())
+        oe = librosa.onset.onset_strength(y=y_p, sr=sr)
+        return AudioFeatures(y=y, y_perc=y_p, y_harm=y_h, sr=sr, chroma=c, bass_chroma=bc, tempo=tempo, beat_frames=bf,
+                             onset_env=oe, duration=librosa.get_duration(y=y, sr=sr),
+                             spectral_centroid=librosa.feature.spectral_centroid(y=y, sr=sr)[0],
+                             spectral_contrast=librosa.feature.spectral_contrast(y=y, sr=sr),
+                             spectral_rolloff=librosa.feature.spectral_rolloff(y=y, sr=sr)[0],
+                             zero_crossing_rate=librosa.feature.zero_crossing_rate(y)[0],
+                             mfccs=librosa.feature.mfcc(y=y, sr=sr))
+
+    def analyze_file(self, file_path: str) -> ExtendedResult:
         try:
-            y, sr = librosa.load(str(self.filepath), sr=44100, mono=True)
-            if len(y) == 0: raise ValueError("Audio file is empty")
-            y, _ = librosa.effects.trim(y, top_db=self.config.trim_top_db)
-            if self.config.normalize_audio: y = normalize_audio(y)
-            if self.config.use_hpss:
-                y_harm, y_perc = librosa.effects.hpss(y)
-            else:
-                y_harm, y_perc = y, np.zeros_like(y)
-            return y_harm, y_perc, sr, len(y) / sr
+            f = self._extract_features(file_path)
+            methods = [ProfileMethod(KRUMHANSL_MAJOR, KRUMHANSL_MINOR, "Krumhansl-Schmuckler", f),
+                       ProfileMethod(TEMPERLEY_MAJOR, TEMPERLEY_MINOR, "Temperley", f),
+                       ProfileMethod(ALBRECHT_MAJOR, ALBRECHT_MINOR, "Albrecht-Shanahan", f),
+                       ProfileMethod(BELLMAN_MAJOR, BELLMAN_MINOR, "Bellman", f),
+                       BassMethod(f), BoundariesMethod(f), ChordVotingMethod(f), CircleOfFifthsMethod(f),
+                       SpectralMethod(f), EssentiaMethod(f)]
+            res = [m.detect() for m in methods];
+            vr = [r for r in res if 'error' not in r]
+            if not vr: return ExtendedResult(file=file_path, key="Unknown", mode="Unknown", confidence=0,
+                                             confidence_level="None", votes=0, total_methods=len(res),
+                                             error="All key methods failed")
+            wv = defaultdict(float)
+            for r in vr: wv[(r['key'], r['mode'])] += r['confidence'] * r['weight']
+            bk, bm = max(wv, key=wv.get);
+            tw = sum(wv.values());
+            cf = wv[(bk, bm)] / tw if tw > 0 else 0
+            cl = "Very High" if cf > 0.8 else "High" if cf > 0.6 else "Medium" if cf > 0.4 else "Low"
+            votes = sum(1 for r in vr if r['key'] == bk and r['mode'] == bm)
+            er = ExtendedResult(file=file_path, key=bk, mode=bm, confidence=round(cf, 3), confidence_level=cl,
+                                votes=votes, total_methods=len(vr),
+                                bpm=BPMDetector.detect(f, self.config), duration_seconds=f.duration, sample_rate=f.sr,
+                                all_results=res, voting={f"{k[0]} {k[1]}": v for k, v in wv.items()})
+
+            if self.config.analyze_sections: er.structure = SectionAnalyzer(f, self.config).analyze()
+            if self.config.analyze_rhythm: er.rhythm = RhythmAnalyzer(f).analyze()
+            if self.config.analyze_vocal: er.vocal = VocalAnalyzer(f, self.config).analyze()
+            if self.config.analyze_chords: er.chords = ChordAnalyzer(f).analyze()
+            if self.config.analyze_dynamics: er.dynamics = DynamicsAnalyzer(f).analyze()
+            if self.config.analyze_contour: er.contour = ContourAnalyzer(f).analyze()
+            if self.config.analyze_timbre: er.timbre = TimbreAnalyzer(f).analyze()
+            if self.config.analyze_texture: er.texture = TextureAnalyzer(f).analyze()
+
+            er.theme_hints = self._generate_theme_hints(er.to_dict())
+
+            del f;
+            clear_memory()
+            return er
         except Exception as e:
-            logger.error(f"Failed to load audio: {e}"); raise
-
-    def _extract_features(self, y: np.ndarray, y_perc: np.ndarray, sr: int, duration: float) -> AudioFeatures:
-        hop_length = 512
-        chroma = medfilt(librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length, bins_per_octave=36),
-                         kernel_size=(1, 3))
-        bass_chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length, bins_per_octave=36,
-                                                 fmin=librosa.note_to_hz('C1'), n_octaves=2)
-        try:
-            tempo, beat_frames = librosa.beat.beat_track(y=y_perc, sr=sr); tempo = float(np.atleast_1d(tempo).mean())
-        except Exception:
-            tempo, beat_frames = 0.0, np.array([])
-        onset_env = librosa.onset.onset_strength(y=y_perc, sr=sr, hop_length=hop_length)
-        try:
-            cent = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)
-        except Exception:
-            cent = None
-        try:
-            rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, hop_length=hop_length, roll_percent=0.85)
-        except Exception:
-            rolloff = None
-        try:
-            zcr = librosa.feature.zero_crossing_rate(y, hop_length=hop_length)
-        except Exception:
-            zcr = None
-        try:
-            mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, hop_length=hop_length)
-        except Exception:
-            mfccs = None
-        try:
-            contr = librosa.feature.spectral_contrast(y=y, sr=sr, hop_length=hop_length)
-        except Exception:
-            contr = None
-        return AudioFeatures(y=y, y_perc=y_perc, sr=sr, chroma=chroma, bass_chroma=bass_chroma, tempo=tempo,
-                             beat_frames=beat_frames, onset_env=onset_env, duration=duration, spectral_centroid=cent,
-                             spectral_contrast=contr, spectral_rolloff=rolloff, zero_crossing_rate=zcr, mfccs=mfccs)
-
-    def _init_methods(self):
-        self.methods = [
-            ProfileMethod(KRUMHANSL_MAJOR, KRUMHANSL_MINOR, "Krumhansl-Schmuckler", self.features),
-            ProfileMethod(TEMPERLEY_MAJOR, TEMPERLEY_MINOR, "Temperley", self.features),
-            ProfileMethod(ALBRECHT_MAJOR, ALBRECHT_MINOR, "Albrecht-Shanahan", self.features),
-            ProfileMethod(BELLMAN_MAJOR, BELLMAN_MINOR, "Bellman", self.features),
-            BassMethod(self.features), BoundariesMethod(self.features), ChordVotingMethod(self.features),
-            CircleOfFifthsMethod(self.features), SpectralMethod(self.features), EssentiaMethod(self.features)
-        ]
-
-    def run(self) -> ExtendedResult:
-        try:
-            y, y_perc, sr, duration = self._load_audio()
-            self.features = self._extract_features(y, y_perc, sr, duration)
-            del y, y_perc
-            self._init_methods()
-            self.results = [m.detect() for m in self.methods]
-            self.bpm_results = BPMDetector.detect(self.features, self.config)
-
-            structure = SectionAnalyzer(self.features).analyze() if self.config.analyze_sections else None
-            rhythm = RhythmAnalyzer(self.features).analyze() if self.config.analyze_rhythm else None
-            vocal = VocalAnalyzer(self.features, self.config.use_whisper,
-                                  self.config.whisper_model).analyze() if self.config.analyze_vocal else None
-            chords = ChordAnalyzer(self.features).analyze() if self.config.analyze_chords else None
-            dynamics = DynamicsAnalyzer(self.features).analyze() if self.config.analyze_dynamics else None
-
-            self.final_result = self._aggregate_results(structure, rhythm, vocal, chords, dynamics)
-
-            if self.config.analyze_timbre:
-                logger.info("Analyzing timbre...")
-                self.final_result.timbre = TimbreAnalyzer(self.features).analyze()
-
-            if self.config.analyze_genre:
-                logger.info("Analyzing genre...")
-                self.final_result.genre = GenreAnalyzer(self.features, self.final_result.timbre, rhythm,
-                                                        self.bpm_results).analyze()
-
-            if self.config.use_neural_api:
-                logger.info("Sending data to Neural Network API...")
-                context = {'bpm': self.bpm_results.get('rounded', 0), 'rhythm': rhythm, 'key': self.final_result.key,
-                           'mode': self.final_result.mode}
-                self.final_result.neural_analysis = NeuralNetworkAnalyzer(self.features, self.config, context).analyze()
-
-            return self.final_result
-        except Exception as e:
-            return ExtendedResult(file=str(self.filepath), key='N/A', mode='N/A', confidence=0.0,
-                                  confidence_level='ОШИБКА', votes=0, total_methods=0, error=str(e))
-
-    def _aggregate_results(self, structure=None, rhythm=None, vocal=None, chords=None, dynamics=None) -> ExtendedResult:
-        valid = [r for r in self.results if 'error' not in r and 'pitch_class' in r]
-        if not valid: return ExtendedResult(file=str(self.filepath), key='N/A', mode='N/A', confidence=0.0,
-                                            confidence_level='ОШИБКА', votes=0, total_methods=0,
-                                            error='No valid results')
-        groups = defaultdict(lambda: {'votes': 0, 'weighted_sum': 0.0, 'methods': []})
-        for res in valid:
-            g = (res['pitch_class'], res['mode']);
-            groups[g]['votes'] += 1;
-            groups[g]['weighted_sum'] += res['confidence'] * res.get('weight', 1.0);
-            groups[g]['methods'].append(res['method'])
-        sorted_groups = sorted(groups.items(), key=lambda x: (x[1]['votes'], x[1]['weighted_sum']), reverse=True)
-        winner_pc, winner_mode = sorted_groups[0][0];
-        winner_data = sorted_groups[0][1]
-        total_weighted = sum(g['weighted_sum'] for _, g in groups.items())
-        confidence = float(np.clip(winner_data['weighted_sum'] / total_weighted if total_weighted > 0 else 0, 0.0, 1.0))
-        level = "ОЧЕНЬ ВЫСОКАЯ" if confidence > 0.8 else "ВЫСОКАЯ" if confidence > 0.6 else "СРЕДНЯЯ" if confidence > 0.4 else "НИЗКАЯ"
-        bpm_dict = None
-        if self.bpm_results:
-            vals = list(self.bpm_results.values());
-            med = float(np.median(vals))
-            bpm_dict = {'average': float(np.mean(vals)), 'median': med, 'rounded': int(round(med)),
-                        'range': [float(np.min(vals)), float(np.max(vals))],
-                        'methods': {k: float(v) for k, v in self.bpm_results.items()}}
-        voting = {f"{NOTE_NAMES[pc]} {mode}": {'votes': d['votes'], 'methods': d['methods']} for (pc, mode), d in
-                  sorted_groups}
-        return ExtendedResult(file=str(self.filepath), key=NOTE_NAMES[winner_pc], mode=winner_mode,
-                              confidence=confidence, confidence_level=level, votes=winner_data['votes'],
-                              total_methods=len(valid), bpm=bpm_dict, duration_seconds=self.features.duration,
-                              sample_rate=self.features.sr, structure=structure, rhythm=rhythm, vocal=vocal,
-                              chords=chords, dynamics=dynamics, all_results=self.results, voting=voting)
-
-    def save_json(self, output_path: Path | None = None):
-        if not self.final_result: return
-        if output_path is None:
-            output_path = self.filepath.with_name(self.filepath.stem + '_analysis.json')
-        else:
-            output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(self.final_result.to_dict(), f, indent=2, ensure_ascii=False, cls=NumpyJSONEncoder)
-        logger.info(f"Results saved to {output_path}")
+            logger.exception("Critical analysis error")
+            return ExtendedResult(file=file_path, key="Error", mode="Error", confidence=0, confidence_level="None",
+                                  votes=0, total_methods=0, error=str(e))
 
 
-# ==================== ПАКЕТНАЯ ОБРАБОТКА И CLI ====================
+# ==================== CLI ====================
+def process_file(filepath: Path, config: AnalysisConfig, save: bool, output_dir: Path | None = None) -> ExtendedResult:
+    analyzer = MusicAnalyzer(config)
+    result = analyzer.analyze_file(str(filepath))
+    if save and output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_file = output_dir / f"{filepath.stem}_analysis.json"
+        with open(out_file, 'w', encoding='utf-8') as file:
+            json.dump(result.to_dict(), file, indent=2, ensure_ascii=False, cls=NumpyJSONEncoder)
+    return result
+
+
 def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
-    if result.error: return colorizer.wrap(f"❌ Error [{result.file}]: {result.error}", 'RED')
     lines = [
-        f"\n{colorizer.wrap('=' * 70, 'CYAN')}",
-        colorizer.wrap(f" 🎵 ФИНАЛЬНЫЙ ВЕРДИКТ: {Path(result.file).name}", 'BOLD', 'GREEN'),
-        colorizer.wrap('=' * 70, 'CYAN'),
-        f"  {colorizer.wrap('Тональность:', 'BOLD')} {colorizer.wrap(f'{result.key} {result.mode}', 'YELLOW')}",
-        f"  {colorizer.wrap('Уверенность:', 'BOLD')} {result.confidence:.1%} ({result.confidence_level})",
-        f"  {colorizer.wrap('Согласованность:', 'BOLD')} {result.votes}/{result.total_methods} методов"
+        colorizer.wrap(f"\n🎵 Файл: {result.file}", "BOLD", "WHITE"),
+        colorizer.wrap(
+            f"Тональность: {result.key} {result.mode} ({result.confidence * 100:.1f}% - {result.confidence_level})",
+            "GREEN"),
+        colorizer.wrap(f"💡 Вайб/Тема: {result.theme_hints}", "CYAN")
     ]
-    if result.bpm:
-        bpm = result.bpm
-        lines.append(f"\n  {colorizer.wrap('BPM:', 'BOLD')} среднее {bpm['average']:.1f}, медиана {bpm['median']:.1f}, округлённое {bpm['rounded']}")
-        lines.append(f"  {colorizer.wrap('Диапазон:', 'BOLD')} {bpm['range'][0]:.1f} – {bpm['range'][1]:.1f}")
+    if result.error: lines.append(colorizer.wrap(f"⚠️ Ошибка: {result.error}", "RED"))
+    if result.bpm: lines.append(f"⏱ BPM: {result.bpm}")
+    if result.rhythm: lines.append(
+        f"🥁 Ритм: {result.rhythm.get('meter', '?')} | Syncopation: {result.rhythm.get('syncopation', 0)}")
+    if result.structure and 'structure_map' in result.structure: lines.append(
+        f"🏗 Структура: {result.structure['structure_map']}")
+    if result.chords and 'chord_progression' in result.chords and result.chords['chord_progression']:
+        prog = [c['chord'] for c in result.chords['chord_progression'][:8]]
+        lines.append(f"🎸 Аккорды: {' -> '.join(prog)}...")
+    if result.timbre: lines.append(f"🎨 Тембр: {result.timbre.get('timbre_class', '?')}")
+    if result.texture: lines.append(f"🧱 Текстура: {result.texture.get('texture_class', '?')}")
+    if result.dynamics: lines.append(
+        f"📈 Динамика: {result.dynamics.get('average_loudness_db', 0)} dB | Пик: {result.dynamics.get('climax_time_sec', 0)}с | Дропы: {result.dynamics.get('drops_count', 0)}")
 
-    # ИЗМЕНЕНО: Жанр (новая иконка 🏷️ и цвет CYAN)
-    if result.genre and 'error' not in result.genre:
-        lines.append(f"\n{colorizer.wrap('🏷️ ЖАНР:', 'BOLD', 'CYAN')}")
-        lines.append(f"    Основной: {colorizer.wrap(result.genre.get('primary_genre', 'N/A'), 'CYAN')}")
-        alt_genres = ', '.join([g['genre'] for g in result.genre.get('predicted_genres', [])[1:]])
-        if alt_genres: lines.append(f"    Альтернативные: {alt_genres}")
+    if result.vocal:
+        if result.vocal.get('text'):
+            lines.append(f"🎤 Текст: {result.vocal['text'][:100]}...")
+            lines.append(
+                f"📏 Метрика: {result.vocal.get('meter', '?')} | Такт: {result.vocal.get('bar_duration_sec', '?')}с")
+        elif result.vocal.get('throat_singing_likely'):
+            lines.append(f"🎤 Вокал: Обнаружено горловое пение (текст не распознан)")
+        elif not result.vocal.get('has_vocals'):
+            lines.append(f"🎤 Вокал: Не обнаружен")
+        elif result.vocal.get('has_vocals') and not result.vocal.get('text'):
+            lines.append(f"🎤 Вокал: Обнаружен, но текст не распознан (возможно, скрим)")
+        lines.append(
+            f"🧩 Сегменты: Вокал ({result.vocal.get('vocal_segments_count', 0)}) | Инструментал ({result.vocal.get('instrument_segments_count', 0)})")
 
-    if result.timbre and 'error' not in result.timbre:
-        lines.append(f"\n{colorizer.wrap('🎨 ТЕМБР:', 'BOLD')}")
-        lines.append(f"    Характеристики: {', '.join(result.timbre.get('timbral_traits', []))}")
-        lines.append(f"    Спектральный центроид: {result.timbre.get('spectral_centroid_hz', 0):.0f} Hz")
-
-    if result.structure and 'error' not in result.structure:
-        lines.append(f"\n{colorizer.wrap('📊 СТРУКТУРА:', 'BOLD')}")
-        lines.append(f"    Секций: {result.structure.get('total_sections', 0)}")
-        lines.append(f"    Припевов: {result.structure.get('chorus_count', 0)}")
-        lines.append(f"    Структура: {result.structure.get('structure_map', 'N/A')}")
-
-    if result.rhythm and 'error' not in result.rhythm:
-        lines.append(f"\n{colorizer.wrap('🎼 РИТМ:', 'BOLD')}")
-        lines.append(f"    Размер: {result.rhythm.get('meter', 'N/A')}")
-        lines.append(f"    Регулярность: {result.rhythm.get('regularity', 0):.1%}")
-        lines.append(f"    Синкопирование: {result.rhythm.get('syncopation', 0):.2f}")
-
-    if result.vocal and 'error' not in result.vocal:
-        lines.append(f"\n{colorizer.wrap('🎤 ВОКАЛ:', 'BOLD')}")
-        lines.append(f"    Присутствие вокала: {result.vocal.get('vocal_presence_percent', 0):.1f}%")
-        if 'language' in result.vocal: lines.append(f"    Язык: {result.vocal['language']}")
-
-    if result.chords and 'error' not in result.chords:
-        lines.append(f"\n{colorizer.wrap('🎸 АККОРДЫ:', 'BOLD')}")
-        lines.append(f"    Метод: {result.chords.get('method', 'N/A')}")
-        lines.append(f"    Аккордов: {result.chords.get('chord_count', 0)}")
-        if 'progression' in result.chords: lines.append(f"    Прогрессия: {result.chords['progression']}")
-
-    if result.dynamics and 'error' not in result.dynamics:
-        lines.append(f"\n{colorizer.wrap('📈 ДИНАМИКА:', 'BOLD')}")
-        lines.append(f"    Динамический диапазон: {result.dynamics.get('dynamic_range_db', 0):.1f} dB")
-        lines.append(f"    Громких секций: {result.dynamics.get('loud_segments_count', 0)}")
-        lines.append(f"    Тихих секций: {result.dynamics.get('quiet_segments_count', 0)}")
-
-    if result.neural_analysis and 'error' not in result.neural_analysis:
-        lines.append(f"\n{colorizer.wrap('🧠 NEURAL API:', 'BOLD', 'BLUE')}")
-        for k, v in result.neural_analysis.items(): lines.append(f"    {k}: {v}")
-    elif result.neural_analysis and 'error' in result.neural_analysis:
-        lines.append(f"\n{colorizer.wrap('🧠 NEURAL API:', 'BOLD')} {colorizer.wrap(result.neural_analysis['error'], 'YELLOW')}")
-
-    lines.append(colorizer.wrap('=' * 70, 'CYAN'))
     return "\n".join(lines)
 
 
-def process_file(filepath: str, config: AnalysisConfig, save: bool, output_dir: str | None) -> ExtendedResult:
-    path = Path(filepath)
-    if not path.exists(): return ExtendedResult(file=filepath, key='N/A', mode='N/A', confidence=0.0,
-                                                confidence_level='ОШИБКА', votes=0, total_methods=0,
-                                                error='File not found')
-    try:
-        detector = KeyDetector(filepath, config=config)
-        result = detector.run()
-        if save and not result.error: detector.save_json(
-            Path(output_dir) / (path.stem + '_analysis.json') if output_dir else None)
-        return result
-    except Exception as e:
-        return ExtendedResult(file=filepath, key='N/A', mode='N/A', confidence=0.0, confidence_level='ОШИБКА', votes=0,
-                              total_methods=0, error=str(e))
-
-
-def get_audio_files(paths: list[str], recursive: bool = False) -> list[str]:
-    valid_exts = {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
-    files = []
-    for p in paths:
-        path = Path(p)
-        if path.is_dir():
-            files.extend(
-                [str(f) for f in (path.rglob if recursive else path.glob)('*') if f.suffix.lower() in valid_exts])
-        elif path.is_file() and path.suffix.lower() in valid_exts:
-            files.append(str(path))
-    return files
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Продвинутый анализатор аудио v4.1")
-    parser.add_argument('files', nargs='*', help='Путь к аудиофайлу(ам) или папкам')
-    parser.add_argument('--output', '-o', help='Папка для сохранения JSON')
-    parser.add_argument('--no-save', action='store_true', help='Не сохранять JSON файлы')
-    parser.add_argument('--json', action='store_true', help='Выводить только JSON в консоль')
-    parser.add_argument('--parallel', '-p', type=int, default=1, help='Количество параллельных процессов')
-    parser.add_argument('--no-color', action='store_true', help='Отключить цветной вывод')
-    parser.add_argument('--recursive', '-r', action='store_true', help='Рекурсивный поиск аудио в папках')
-    parser.add_argument('--no-timbre', action='store_true', help='Отключить анализ тембра')
-    parser.add_argument('--no-genre', action='store_true', help='Отключить анализ жанров')
-    parser.add_argument('--neural-api', action='store_true', help='Включить интеграцию с внешней нейросетью')
-    parser.add_argument('--api-url', default='http://localhost:8000/predict', help='URL вашего Neural Network API')
-    args = parser.parse_args()
-    if not args.files: parser.print_help(); return
+def main(args):
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
     colorizer = Colorizer(enabled=not args.no_color)
-    config = AnalysisConfig(analyze_timbre=not args.no_timbre, analyze_genre=not args.no_genre,
-                            use_neural_api=args.neural_api, neural_api_url=args.api_url)
+    import torch;
+    import multiprocessing as mp
+    torch.set_num_threads(1)
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+    config = AnalysisConfig(use_whisper=not args.no_whisper, whisper_model=args.whisper_model)
     files_to_process = get_audio_files(args.files, recursive=args.recursive)
-    if not files_to_process: print(colorizer.wrap("Не найдено аудиофайлов для обработки.", 'RED')); return
+    if not files_to_process:
+        logger.error("Не найдено аудиофайлов.")
+        print(colorizer.wrap("Не найдено аудиофайлов.", 'RED'))
+        return
     if args.json: logging.disable(logging.CRITICAL)
-    if args.parallel <= 1 or len(files_to_process) == 1:
-        for filepath in tqdm(files_to_process, desc="Обработка", file=sys.stdout, dynamic_ncols=True,
-                             disable=args.json):
-            result = process_file(filepath, config, not args.no_save, args.output)
-            if args.json:
-                print(json.dumps(result.to_dict(), ensure_ascii=False, cls=NumpyJSONEncoder))
-            else:
-                tqdm.write(format_result_output(result, colorizer))
-    else:
-        with ProcessPoolExecutor(max_workers=args.parallel) as executor:
-            futures = {executor.submit(process_file, fp, config, not args.no_save, args.output): fp for fp in
-                       files_to_process}
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Обработка", file=sys.stdout,
-                               dynamic_ncols=True, disable=args.json):
-                try:
-                    result = future.result()
-                    if args.json:
-                        print(json.dumps(result.to_dict(), ensure_ascii=False, cls=NumpyJSONEncoder))
-                    else:
-                        tqdm.write(format_result_output(result, colorizer))
-                except Exception as e:
-                    if not args.json: tqdm.write(colorizer.wrap(f"❌ Ошибка: {e}", 'RED'))
+    for filepath in tqdm(files_to_process, desc=f"Обработка v{__version__}", file=sys.stdout, dynamic_ncols=True,
+                         disable=args.json):
+        result = process_file(Path(filepath), config, not args.no_save, Path(args.output) if args.output else None)
+        if args.json:
+            print(json.dumps(result.to_dict(), ensure_ascii=False, cls=NumpyJSONEncoder))
+        else:
+            tqdm.write(format_result_output(result, colorizer))
 
 
 if __name__ == "__main__":
-    main()
+    main(EARLY_ARGS)
