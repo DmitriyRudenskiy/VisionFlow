@@ -21,7 +21,7 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 # ==================== ВЕРСИЯ ====================
-__version__ = "4.0.0"
+__version__ = "4.1.0"
 
 # ==================== ЗАВИСИМОСТИ ====================
 try:
@@ -84,12 +84,9 @@ logger = logging.getLogger(__name__)
 # ==================== JSON ENCODER ====================
 class NumpyJSONEncoder(json.JSONEncoder):
     def default(self, obj: Any) -> Any:
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
+        if isinstance(obj, np.integer): return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
         return super().default(obj)
 
 
@@ -106,8 +103,7 @@ class Colorizer:
         self.enabled = enabled and sys.stdout.isatty()
 
     def wrap(self, text: str, *styles: str) -> str:
-        if not self.enabled:
-            return str(text)
+        if not self.enabled: return str(text)
         prefix = "".join(self._codes.get(s, '') for s in styles)
         return f"{prefix}{text}{self._codes['RESET']}"
 
@@ -115,7 +111,6 @@ class Colorizer:
 # ==================== КОНСТАНТЫ ====================
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 PITCH_CLASS_MAP = {name: i for i, name in enumerate(NOTE_NAMES)}
-
 KRUMHANSL_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 KRUMHANSL_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 TEMPERLEY_MAJOR = np.array([5.0, 2.0, 3.0, 2.0, 4.0, 4.0, 2.0, 5.0, 2.0, 3.0, 2.0, 3.0])
@@ -124,7 +119,6 @@ ALBRECHT_MAJOR = np.array([0.238, 0.006, 0.011, 0.006, 0.074, 0.014, 0.006, 0.24
 ALBRECHT_MINOR = np.array([0.220, 0.006, 0.011, 0.074, 0.014, 0.029, 0.006, 0.226, 0.057, 0.014, 0.023, 0.006])
 BELLMAN_MAJOR = np.array([0.169, 0.003, 0.041, 0.003, 0.117, 0.013, 0.003, 0.212, 0.007, 0.054, 0.003, 0.027])
 BELLMAN_MINOR = np.array([0.181, 0.003, 0.048, 0.074, 0.013, 0.034, 0.003, 0.214, 0.074, 0.013, 0.034, 0.013])
-
 METHOD_WEIGHTS = {
     'Krumhansl-Schmuckler': 0.8, 'Temperley': 1.0, 'Albrecht-Shanahan': 1.3,
     'Bellman': 1.1, 'Bass Analysis': 1.2, 'Track Boundaries': 0.9,
@@ -133,101 +127,99 @@ METHOD_WEIGHTS = {
 }
 
 
-# ==================== ТИПИЗАЦИЯ ====================
+# ==================== ТИПИЗАЦИЯ И DATACLASSES ====================
 class MethodResult(TypedDict, total=False):
-    method: str
-    pitch_class: int
-    key: str
-    mode: str
-    score: float
-    confidence: float
-    weight: float
+    method: str;
+    pitch_class: int;
+    key: str;
+    mode: str;
+    score: float;
+    confidence: float;
+    weight: float;
     error: str
 
 
-# ==================== DATACLASSES ====================
 @dataclass
 class AnalysisConfig:
-    sample_rate: int = 44100
-    trim_top_db: int = 20
-    use_hpss: bool = True
+    sample_rate: int = 44100;
+    trim_top_db: int = 20;
+    use_hpss: bool = True;
     normalize_audio: bool = True
-    bpm_min: int = 40
-    bpm_max: int = 220
-    use_whisper: bool = False
+    bpm_min: int = 40;
+    bpm_max: int = 220;
+    use_whisper: bool = False;
     whisper_model: str = "base"
-    analyze_sections: bool = True
-    analyze_rhythm: bool = True
+    analyze_sections: bool = True;
+    analyze_rhythm: bool = True;
     analyze_vocal: bool = True
-    analyze_chords: bool = True
+    analyze_chords: bool = True;
     analyze_dynamics: bool = True
-    analyze_timbre: bool = True  # Новое
-    analyze_genre: bool = True  # Новое
-    use_neural_api: bool = False  # Новое
-    neural_api_url: str = "http://localhost:8000/predict"  # Новое
+    analyze_timbre: bool = True;
+    analyze_genre: bool = True
+    use_neural_api: bool = False;
+    neural_api_url: str = "http://localhost:8000/predict"
 
 
 @dataclass
 class AudioFeatures:
-    y: np.ndarray
-    y_perc: np.ndarray
-    sr: int
-    chroma: np.ndarray
+    y: np.ndarray;
+    y_perc: np.ndarray;
+    sr: int;
+    chroma: np.ndarray;
     bass_chroma: np.ndarray
-    tempo: float
-    beat_frames: np.ndarray
-    onset_env: np.ndarray
+    tempo: float;
+    beat_frames: np.ndarray;
+    onset_env: np.ndarray;
     duration: float
-    spectral_centroid: np.ndarray | None = None
+    spectral_centroid: np.ndarray | None = None;
     spectral_contrast: np.ndarray | None = None
-    spectral_rolloff: np.ndarray | None = None  # Новое
-    zero_crossing_rate: np.ndarray | None = None  # Новое
-    mfccs: np.ndarray | None = None  # Новое
+    spectral_rolloff: np.ndarray | None = None;
+    zero_crossing_rate: np.ndarray | None = None
+    mfccs: np.ndarray | None = None
 
 
 @dataclass
 class ExtendedResult:
-    file: str
-    key: str
-    mode: str
-    confidence: float
-    confidence_level: str
-    votes: int
+    file: str;
+    key: str;
+    mode: str;
+    confidence: float;
+    confidence_level: str;
+    votes: int;
     total_methods: int
-    bpm: dict | None = None
-    duration_seconds: float = 0.0
+    bpm: dict | None = None;
+    duration_seconds: float = 0.0;
     sample_rate: int = 22050
-    structure: dict | None = None
-    rhythm: dict | None = None
+    structure: dict | None = None;
+    rhythm: dict | None = None;
     vocal: dict | None = None
-    chords: dict | None = None
+    chords: dict | None = None;
     dynamics: dict | None = None
-    timbre: dict | None = None  # Новое
-    genre: dict | None = None  # Новое
-    neural_analysis: dict | None = None  # Новое
-    all_results: list = field(default_factory=list)
-    voting: dict = field(default_factory=dict)
+    timbre: dict | None = None;
+    genre: dict | None = None;
+    neural_analysis: dict | None = None
+    all_results: list = field(default_factory=list);
+    voting: dict = field(default_factory=dict);
     error: str | None = None
 
     def to_dict(self) -> dict:
         return {
-            'file': self.file, 'duration_seconds': self.duration_seconds,
-            'sample_rate': self.sample_rate, 'key': self.key, 'mode': self.mode,
-            'confidence': self.confidence, 'confidence_level': self.confidence_level,
+            'file': self.file, 'duration_seconds': self.duration_seconds, 'sample_rate': self.sample_rate,
+            'key': self.key, 'mode': self.mode, 'confidence': self.confidence,
+            'confidence_level': self.confidence_level,
             'votes': self.votes, 'total_methods': self.total_methods, 'bpm': self.bpm,
-            'structure': self.structure, 'rhythm': self.rhythm, 'vocal': self.vocal,
-            'chords': self.chords, 'dynamics': self.dynamics,
-            'timbre': self.timbre, 'genre': self.genre, 'neural_analysis': self.neural_analysis,
+            'structure': self.structure, 'rhythm': self.rhythm, 'vocal': self.vocal, 'chords': self.chords,
+            'dynamics': self.dynamics, 'timbre': self.timbre, 'genre': self.genre,
+            'neural_analysis': self.neural_analysis,
             'all_results': self.all_results, 'voting': self.voting
         }
 
 
-# (Оставляю без изменений вспомогательные функции и методы 1-10 для краткости, они идентичны предыдущему ответу)
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def normalize_key(key_name: str) -> str:
     try:
-        midi = librosa.note_to_midi(key_name)
-        pc = midi % 12
+        midi = librosa.note_to_midi(key_name);
+        pc = midi % 12;
         return NOTE_NAMES[pc]
     except Exception:
         mapping = {'Db': 'C#', 'Eb': 'D#', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#', 'Cb': 'B', 'Fb': 'E', 'B#': 'C',
@@ -243,20 +235,18 @@ def normalize_audio(y: np.ndarray, target_db: float = -3.0) -> np.ndarray:
     return y * (target_peak / peak)
 
 
-# ==================== БАЗОВЫЙ КЛАСС ДЛЯ МЕТОДОВ ====================
+# ==================== БАЗОВЫЙ КЛАСС И МЕТОДЫ ОПРЕДЕЛЕНИЯ ТОНАЛЬНОСТИ ====================
 class KeyMethod:
-    name: str = "BaseMethod"
+    name: str = "BaseMethod";
     weight: float = 1.0
 
     def __init__(self, features: AudioFeatures):
-        self.features = features
-        self._chroma_avg = None
+        self.features = features; self._chroma_avg = None
 
     @property
     def chroma_avg(self) -> np.ndarray:
         if self._chroma_avg is None:
-            self._chroma_avg = np.mean(self.features.chroma, axis=1)
-            self._chroma_avg = self._chroma_avg - np.mean(self._chroma_avg)
+            self._chroma_avg = np.mean(self.features.chroma, axis=1) - np.mean(np.mean(self.features.chroma, axis=1))
             norm = np.linalg.norm(self._chroma_avg)
             if norm > 0: self._chroma_avg = self._chroma_avg / norm
         return self._chroma_avg
@@ -270,12 +260,12 @@ class KeyMethod:
 
 
 class ProfileMethod(KeyMethod):
-    _maj_matrices: dict = {}
+    _maj_matrices: dict = {};
     _min_matrices: dict = {}
 
     def __init__(self, major_profile: np.ndarray, minor_profile: np.ndarray, method_name: str, features: AudioFeatures):
-        super().__init__(features)
-        self.name = method_name
+        super().__init__(features);
+        self.name = method_name;
         self.weight = METHOD_WEIGHTS.get(self.name, 1.0)
         if method_name not in self._maj_matrices:
             maj_norm = major_profile - np.mean(major_profile);
@@ -305,7 +295,7 @@ class BassMethod(KeyMethod):
 
     def detect(self) -> MethodResult:
         try:
-            bass_energy = np.mean(self.features.bass_chroma, axis=1)
+            bass_energy = np.mean(self.features.bass_chroma, axis=1);
             tonic_idx = int(np.argmax(bass_energy))
             score = bass_energy[tonic_idx] + 0.5 * bass_energy[(tonic_idx + 7) % 12]
             mode = 'Major' if bass_energy[(tonic_idx + 4) % 12] > bass_energy[(tonic_idx + 3) % 12] else 'Minor'
@@ -325,7 +315,7 @@ class BoundariesMethod(KeyMethod):
         if samples_frames * 2 >= self.features.chroma.shape[1]: samples_frames = self.features.chroma.shape[1] // 4
         boundary_chroma = (np.mean(self.features.chroma[:, :samples_frames], axis=1) + np.mean(
             self.features.chroma[:, -samples_frames:], axis=1)) / 2
-        boundary_chroma -= np.mean(boundary_chroma)
+        boundary_chroma -= np.mean(boundary_chroma);
         tonic_idx = int(np.argmax(boundary_chroma))
         major_energy = boundary_chroma[(tonic_idx + 4) % 12];
         minor_energy = boundary_chroma[(tonic_idx + 3) % 12]
@@ -410,8 +400,8 @@ class EssentiaMethod(KeyMethod):
 
     def detect(self) -> MethodResult:
         try:
-            audio = self.features.y.astype(np.float32)
-            profiles = ['temperley', 'krumhansl', 'edma'];
+            audio = self.features.y.astype(np.float32);
+            profiles = ['temperley', 'krumhansl', 'edma']
             best_result = None;
             best_strength = 0.0
             for profile in profiles:
@@ -431,6 +421,7 @@ class EssentiaMethod(KeyMethod):
             return {'method': self.name, 'error': str(e)}
 
 
+# ==================== BPM ====================
 class BPMDetector:
     @staticmethod
     def _autocorrelate_bpm_fft(signal: np.ndarray, sr: int, min_bpm: int = 40, max_bpm: int = 220) -> float | None:
@@ -473,7 +464,7 @@ class BPMDetector:
         return {}
 
 
-# ==================== АНАЛИЗАТОР СТРУКТУРЫ, РИТМА, ВОКАЛА, АККОРДОВ, ДИНАМИКИ (Из предыдущего ответа) ====================
+# ==================== АНАЛИЗАТОРЫ СТРУКТУРЫ, РИТМА, ВОКАЛА, АККОРДОВ, ДИНАМИКИ ====================
 class SectionAnalyzer:
     def __init__(self, features: AudioFeatures):
         self.features = features
@@ -574,7 +565,20 @@ class VocalAnalyzer:
             hop_length = 512
             vocal_band = (freqs >= 200) & (freqs <= 2000);
             vocal_ratio = np.mean(S[vocal_band, :], axis=0) / (np.mean(S, axis=0) + 1e-10)
-            result = {'vocal_presence_percent': round(float(np.mean(vocal_ratio > 0.3) * 100), 1)}
+            vocal_segments = [];
+            threshold = 0.3;
+            in_vocal = False;
+            start_time = 0
+            for i, ratio in enumerate(vocal_ratio):
+                time = librosa.frames_to_time(i, sr=self.features.sr, hop_length=hop_length)
+                if ratio > threshold and not in_vocal:
+                    in_vocal = True; start_time = time
+                elif ratio <= threshold and in_vocal:
+                    in_vocal = False
+                    if time - start_time > 0.5: vocal_segments.append(
+                        {'start': round(start_time, 2), 'end': round(time, 2), 'duration': round(time - start_time, 2)})
+            result = {'vocal_presence_percent': round(float(np.mean(vocal_ratio > 0.3) * 100), 1),
+                      'vocal_segments': vocal_segments, 'vocal_segments_count': len(vocal_segments)}
             if self.use_whisper:
                 try:
                     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
@@ -649,15 +653,17 @@ class DynamicsAnalyzer:
             loud_segments = [];
             quiet_segments = [];
             segment_length = int(2 * sr / hop_length)
+            th_loud = np.percentile(rms_db, 70);
+            th_quiet = np.percentile(rms_db, 30)
             for i in range(0, len(rms_db), segment_length):
                 segment = rms_db[i:i + segment_length]
                 if len(segment) < segment_length // 2: break
                 seg_mean = np.mean(segment);
                 start_time = librosa.frames_to_time(i, sr=sr, hop_length=hop_length);
                 end_time = librosa.frames_to_time(i + len(segment), sr=sr, hop_length=hop_length)
-                if seg_mean > np.percentile(rms_db, 70):
+                if seg_mean > th_loud:
                     loud_segments.append({'start': round(float(start_time), 2), 'end': round(float(end_time), 2)})
-                elif seg_mean < np.percentile(rms_db, 30):
+                elif seg_mean < th_quiet:
                     quiet_segments.append({'start': round(float(start_time), 2), 'end': round(float(end_time), 2)})
             return {'dynamic_range_db': round(float(max_db - min_db), 1), 'loud_segments_count': len(loud_segments),
                     'quiet_segments_count': len(quiet_segments)}
@@ -667,8 +673,6 @@ class DynamicsAnalyzer:
 
 # ==================== НОВОЕ: АНАЛИЗАТОР ТЕМБРА ====================
 class TimbreAnalyzer:
-    """Анализ тембра на основе MFCC, спектральных признаков и ZCR."""
-
     def __init__(self, features: AudioFeatures):
         self.features = features
 
@@ -677,9 +681,6 @@ class TimbreAnalyzer:
             centroid = np.mean(self.features.spectral_centroid) if self.features.spectral_centroid is not None else 0
             rolloff = np.mean(self.features.spectral_rolloff) if self.features.spectral_rolloff is not None else 0
             zcr = np.mean(self.features.zero_crossing_rate) if self.features.zero_crossing_rate is not None else 0
-            mfccs = self.features.mfccs
-
-            # Эвристика для описания тембра
             descriptions = []
             if centroid < 1500:
                 descriptions.append("Теплый / Темный")
@@ -687,20 +688,14 @@ class TimbreAnalyzer:
                 descriptions.append("Яркий / Резкий")
             else:
                 descriptions.append("Сбалансированный")
-
             if zcr > 0.15:
                 descriptions.append("Шумный / Перкуссионный")
             else:
                 descriptions.append("Гармонический / Гладкий")
-
-            # Усредняем первые 5 коэффициентов MFCC (они отвечают за форму спектра)
-            mfcc_avg = np.mean(mfccs[:5], axis=1) if mfccs is not None else []
-
+            mfcc_avg = np.mean(self.features.mfccs[:5], axis=1) if self.features.mfccs is not None else []
             return {
-                'spectral_centroid_hz': round(float(centroid), 2),
-                'spectral_rolloff_hz': round(float(rolloff), 2),
-                'zero_crossing_rate': round(float(zcr), 4),
-                'timbral_traits': descriptions,
+                'spectral_centroid_hz': round(float(centroid), 2), 'spectral_rolloff_hz': round(float(rolloff), 2),
+                'zero_crossing_rate': round(float(zcr), 4), 'timbral_traits': descriptions,
                 'mfcc_profile': [round(float(c), 2) for c in mfcc_avg]
             }
         except Exception as e:
@@ -709,136 +704,84 @@ class TimbreAnalyzer:
 
 # ==================== НОВОЕ: АНАЛИЗАТОР ЖАНРОВ ====================
 class GenreAnalyzer:
-    """Эвристический анализ жанра на основе ритма, тембра и динамики."""
-
     def __init__(self, features: AudioFeatures, timbre: dict | None, rhythm: dict | None, bpm: dict | None):
-        self.features = features
-        self.timbre = timbre or {}
-        self.rhythm = rhythm or {}
+        self.features = features;
+        self.timbre = timbre or {};
+        self.rhythm = rhythm or {};
         self.bpm = bpm or {}
 
     def analyze(self) -> dict:
         try:
-            tempo = self.bpm.get('rounded', 0)
+            tempo = self.bpm.get('rounded', 0);
             centroid = self.timbre.get('spectral_centroid_hz', 2000)
-            zcr = self.timbre.get('zero_crossing_rate', 0.05)
-            meter = self.rhythm.get('meter', '4/4')
+            zcr = self.timbre.get('zero_crossing_rate', 0.05);
             regularity = self.rhythm.get('regularity', 0.8)
-
             scores = defaultdict(float)
-
-            # EDM / Electronic
-            if 118 <= tempo <= 135 and regularity > 0.8:
-                scores['EDM / House'] += 3
-            if 135 < tempo <= 150 and regularity > 0.8:
-                scores['Drum & Bass'] += 3
-
-            # Hip-Hop / Rap
-            if 80 <= tempo <= 105 and zcr > 0.1 and regularity > 0.7:
-                scores['Hip-Hop / Rap'] += 3
-
-            # Rock / Metal
-            if 110 <= tempo <= 180 and centroid > 3000 and zcr > 0.1:
-                scores['Rock / Metal'] += 3
-
-            # Pop
-            if 100 <= tempo <= 130 and 2000 < centroid < 3500:
-                scores['Pop'] += 2
-
-            # Classical / Orchestral
-            if regularity < 0.6 and centroid < 2500 and zcr < 0.08:
-                scores['Classical / Orchestral'] += 3
-
-            # Jazz / Blues
-            if 70 <= tempo <= 120 and regularity < 0.7 and meter != "4/4":
-                scores['Jazz / Blues'] += 2
-                scores['Classical / Orchestral'] += 1
-
-            # Ambient / Chillout
-            if tempo < 80 and centroid < 2000 and regularity < 0.5:
-                scores['Ambient / Chillout'] += 3
-
-            # Если ничего не подошло хорошо
-            if not scores:
-                scores['Pop / Mainstream'] += 1
-
-            # Сортируем и берем топ-3
+            if 118 <= tempo <= 135 and regularity > 0.8: scores['EDM / House'] += 3
+            if 135 < tempo <= 150 and regularity > 0.8: scores['Drum & Bass'] += 3
+            if 80 <= tempo <= 105 and zcr > 0.1 and regularity > 0.7: scores['Hip-Hop / Rap'] += 3
+            if 110 <= tempo <= 180 and centroid > 3000 and zcr > 0.1: scores['Rock / Metal'] += 3
+            if 100 <= tempo <= 130 and 2000 < centroid < 3500: scores['Pop'] += 2
+            if regularity < 0.6 and centroid < 2500 and zcr < 0.08: scores['Classical / Orchestral'] += 3
+            if tempo < 80 and centroid < 2000 and regularity < 0.5: scores['Ambient / Chillout'] += 3
+            if not scores: scores['Pop / Mainstream'] += 1
             sorted_genres = sorted(scores.items(), key=lambda x: x[1], reverse=True)
             top_genres = [{"genre": g, "score": float(s)} for g, s in sorted_genres[:3]]
-
-            return {
-                'predicted_genres': top_genres,
-                'primary_genre': top_genres[0]['genre'] if top_genres else 'Unknown'
-            }
+            return {'predicted_genres': top_genres,
+                    'primary_genre': top_genres[0]['genre'] if top_genres else 'Unknown'}
         except Exception as e:
             return {'error': str(e)}
 
 
 # ==================== НОВОЕ: ИНТЕГРАЦИЯ С НЕЙРОСЕТЬЮ (JSON API) ====================
 class NeuralNetworkAnalyzer:
-    """Отправка признаков на внешнюю нейросеть через JSON API."""
-
     def __init__(self, features: AudioFeatures, config: AnalysisConfig, context: dict):
-        self.features = features
-        self.api_url = config.neural_api_url
+        self.features = features;
+        self.api_url = config.neural_api_url;
         self.context = context
 
     def _prepare_payload(self) -> dict:
-        # Собираем сжатый JSON-пакет с низкоуровневыми фичами для внешней NN
         chroma_avg = np.mean(self.features.chroma, axis=1).tolist()
         mfcc_avg = np.mean(self.features.mfccs, axis=1).tolist() if self.features.mfccs is not None else []
-
         return {
             "audio_features": {
-                "duration_sec": float(self.features.duration),
-                "tempo_bpm": self.context.get('bpm', 0),
+                "duration_sec": float(self.features.duration), "tempo_bpm": self.context.get('bpm', 0),
                 "chroma_avg": [round(float(c), 4) for c in chroma_avg],
                 "mfcc_avg": [round(float(c), 4) for c in mfcc_avg],
-                "spectral_centroid": round(float(np.mean(self.features.spectral_centroid)), 2),
-                "zero_crossing_rate": round(float(np.mean(self.features.zero_crossing_rate)), 4),
+                "spectral_centroid": round(float(np.mean(self.features.spectral_centroid)),
+                                           2) if self.features.spectral_centroid is not None else 0,
+                "zero_crossing_rate": round(float(np.mean(self.features.zero_crossing_rate)),
+                                            4) if self.features.zero_crossing_rate is not None else 0,
                 "rhythm_regularity": self.context.get('rhythm', {}).get('regularity', 0)
-            },
-            "metadata": {
-                "key": self.context.get('key'),
-                "mode": self.context.get('mode')
-            }
+            }, "metadata": {"key": self.context.get('key'), "mode": self.context.get('mode')}
         }
 
     def analyze(self) -> dict:
-        if not self.api_url:
-            return {'error': 'No API URL provided'}
-
+        if not self.api_url: return {'error': 'No API URL provided'}
         try:
             payload = self._prepare_payload()
             data = json.dumps(payload, cls=NumpyJSONEncoder).encode('utf-8')
-            req = urllib.request.Request(
-                self.api_url,
-                data=data,
-                headers={'Content-Type': 'application/json'},
-                method='POST'
-            )
-
+            req = urllib.request.Request(self.api_url, data=data, headers={'Content-Type': 'application/json'},
+                                         method='POST')
             with urllib.request.urlopen(req, timeout=10) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                return result
-
+                return json.loads(response.read().decode('utf-8'))
         except urllib.error.URLError as e:
-            logger.warning(f"Neural API connection failed: {e.reason}")
+            logger.warning(f"Neural API connection failed: {e.reason}");
             return {'error': f'API Connection failed: {e.reason}'}
         except Exception as e:
-            logger.error(f"Neural API analysis failed: {e}")
+            logger.error(f"Neural API analysis failed: {e}");
             return {'error': str(e)}
 
 
 # ==================== ОСНОВНОЙ КЛАСС АНАЛИЗАТОРА ====================
 class KeyDetector:
     def __init__(self, filepath: str, config: AnalysisConfig | None = None):
-        self.filepath = Path(filepath)
+        self.filepath = Path(filepath);
         self.config = config or AnalysisConfig()
-        self.features: AudioFeatures | None = None
+        self.features: AudioFeatures | None = None;
         self.methods: list[KeyMethod] = []
-        self.results: list[MethodResult] = []
-        self.bpm_results: dict = {}
+        self.results: list[MethodResult] = [];
+        self.bpm_results: dict = {};
         self.final_result: ExtendedResult | None = None
 
     def _load_audio(self) -> tuple[np.ndarray, np.ndarray, int, float]:
@@ -853,8 +796,7 @@ class KeyDetector:
                 y_harm, y_perc = y, np.zeros_like(y)
             return y_harm, y_perc, sr, len(y) / sr
         except Exception as e:
-            logger.error(f"Failed to load audio: {e}");
-            raise
+            logger.error(f"Failed to load audio: {e}"); raise
 
     def _extract_features(self, y: np.ndarray, y_perc: np.ndarray, sr: int, duration: float) -> AudioFeatures:
         hop_length = 512
@@ -862,15 +804,11 @@ class KeyDetector:
                          kernel_size=(1, 3))
         bass_chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length, bins_per_octave=36,
                                                  fmin=librosa.note_to_hz('C1'), n_octaves=2)
-
         try:
             tempo, beat_frames = librosa.beat.beat_track(y=y_perc, sr=sr); tempo = float(np.atleast_1d(tempo).mean())
         except Exception:
             tempo, beat_frames = 0.0, np.array([])
-
         onset_env = librosa.onset.onset_strength(y=y_perc, sr=sr, hop_length=hop_length)
-
-        # НОВЫЕ ФИЧИ ДЛЯ ТЕМБРА
         try:
             cent = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)
         except Exception:
@@ -891,11 +829,9 @@ class KeyDetector:
             contr = librosa.feature.spectral_contrast(y=y, sr=sr, hop_length=hop_length)
         except Exception:
             contr = None
-
-        return AudioFeatures(y=y, y_perc=y_perc, sr=sr, chroma=chroma, bass_chroma=bass_chroma,
-                             tempo=tempo, beat_frames=beat_frames, onset_env=onset_env, duration=duration,
-                             spectral_centroid=cent, spectral_contrast=contr, spectral_rolloff=rolloff,
-                             zero_crossing_rate=zcr, mfccs=mfccs)
+        return AudioFeatures(y=y, y_perc=y_perc, sr=sr, chroma=chroma, bass_chroma=bass_chroma, tempo=tempo,
+                             beat_frames=beat_frames, onset_env=onset_env, duration=duration, spectral_centroid=cent,
+                             spectral_contrast=contr, spectral_rolloff=rolloff, zero_crossing_rate=zcr, mfccs=mfccs)
 
     def _init_methods(self):
         self.methods = [
@@ -907,42 +843,15 @@ class KeyDetector:
             CircleOfFifthsMethod(self.features), SpectralMethod(self.features), EssentiaMethod(self.features)
         ]
 
-    def _run_extended_analysis(self, structure, rhythm, vocal, chords, dynamics) -> tuple[
-        dict | None, dict | None, dict | None]:
-        timbre_res = genre_res = nn_res = None
-
-        if self.config.analyze_timbre:
-            logger.info("Analyzing timbre...")
-            timbre_res = TimbreAnalyzer(self.features).analyze()
-
-        if self.config.analyze_genre:
-            logger.info("Analyzing genre...")
-            genre_res = GenreAnalyzer(self.features, timbre_res, rhythm, self.bpm_results).analyze()
-
-        if self.config.use_neural_api:
-            logger.info("Sending data to Neural Network API...")
-            context = {
-                'bpm': self.bpm_results.get('rounded', 0),
-                'rhythm': rhythm,
-                'key': self.final_result.key if self.final_result else None,
-                'mode': self.final_result.mode if self.final_result else None
-            }
-            nn_res = NeuralNetworkAnalyzer(self.features, self.config, context).analyze()
-
-        return timbre_res, genre_res, nn_res
-
     def run(self) -> ExtendedResult:
         try:
             y, y_perc, sr, duration = self._load_audio()
             self.features = self._extract_features(y, y_perc, sr, duration)
             del y, y_perc
-
             self._init_methods()
             self.results = [m.detect() for m in self.methods]
-
             self.bpm_results = BPMDetector.detect(self.features, self.config)
 
-            # Сначала запускаем базовые анализаторы
             structure = SectionAnalyzer(self.features).analyze() if self.config.analyze_sections else None
             rhythm = RhythmAnalyzer(self.features).analyze() if self.config.analyze_rhythm else None
             vocal = VocalAnalyzer(self.features, self.config.use_whisper,
@@ -950,14 +859,22 @@ class KeyDetector:
             chords = ChordAnalyzer(self.features).analyze() if self.config.analyze_chords else None
             dynamics = DynamicsAnalyzer(self.features).analyze() if self.config.analyze_dynamics else None
 
-            # Агрегируем результаты тональности
             self.final_result = self._aggregate_results(structure, rhythm, vocal, chords, dynamics)
 
-            # Запускаем новые анализаторы (им нужен final_result и features)
-            timbre, genre, neural = self._run_extended_analysis(structure, rhythm, vocal, chords, dynamics)
-            self.final_result.timbre = timbre
-            self.final_result.genre = genre
-            self.final_result.neural_analysis = neural
+            if self.config.analyze_timbre:
+                logger.info("Analyzing timbre...")
+                self.final_result.timbre = TimbreAnalyzer(self.features).analyze()
+
+            if self.config.analyze_genre:
+                logger.info("Analyzing genre...")
+                self.final_result.genre = GenreAnalyzer(self.features, self.final_result.timbre, rhythm,
+                                                        self.bpm_results).analyze()
+
+            if self.config.use_neural_api:
+                logger.info("Sending data to Neural Network API...")
+                context = {'bpm': self.bpm_results.get('rounded', 0), 'rhythm': rhythm, 'key': self.final_result.key,
+                           'mode': self.final_result.mode}
+                self.final_result.neural_analysis = NeuralNetworkAnalyzer(self.features, self.config, context).analyze()
 
             return self.final_result
         except Exception as e:
@@ -981,7 +898,6 @@ class KeyDetector:
         total_weighted = sum(g['weighted_sum'] for _, g in groups.items())
         confidence = float(np.clip(winner_data['weighted_sum'] / total_weighted if total_weighted > 0 else 0, 0.0, 1.0))
         level = "ОЧЕНЬ ВЫСОКАЯ" if confidence > 0.8 else "ВЫСОКАЯ" if confidence > 0.6 else "СРЕДНЯЯ" if confidence > 0.4 else "НИЗКАЯ"
-
         bpm_dict = None
         if self.bpm_results:
             vals = list(self.bpm_results.values());
@@ -989,18 +905,13 @@ class KeyDetector:
             bpm_dict = {'average': float(np.mean(vals)), 'median': med, 'rounded': int(round(med)),
                         'range': [float(np.min(vals)), float(np.max(vals))],
                         'methods': {k: float(v) for k, v in self.bpm_results.items()}}
-
         voting = {f"{NOTE_NAMES[pc]} {mode}": {'votes': d['votes'], 'methods': d['methods']} for (pc, mode), d in
                   sorted_groups}
-
         return ExtendedResult(file=str(self.filepath), key=NOTE_NAMES[winner_pc], mode=winner_mode,
-                              confidence=confidence,
-                              confidence_level=level, votes=winner_data['votes'], total_methods=len(valid),
-                              bpm=bpm_dict,
-                              duration_seconds=self.features.duration, sample_rate=self.features.sr,
-                              structure=structure,
-                              rhythm=rhythm, vocal=vocal, chords=chords, dynamics=dynamics, all_results=self.results,
-                              voting=voting)
+                              confidence=confidence, confidence_level=level, votes=winner_data['votes'],
+                              total_methods=len(valid), bpm=bpm_dict, duration_seconds=self.features.duration,
+                              sample_rate=self.features.sr, structure=structure, rhythm=rhythm, vocal=vocal,
+                              chords=chords, dynamics=dynamics, all_results=self.results, voting=voting)
 
     def save_json(self, output_path: Path | None = None):
         if not self.final_result: return
@@ -1025,34 +936,57 @@ def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
         f"  {colorizer.wrap('Уверенность:', 'BOLD')} {result.confidence:.1%} ({result.confidence_level})",
         f"  {colorizer.wrap('Согласованность:', 'BOLD')} {result.votes}/{result.total_methods} методов"
     ]
-    if result.bpm: lines.append(f"  {colorizer.wrap('BPM:', 'BOLD')} {result.bpm['rounded']} (медиана)")
+    if result.bpm:
+        bpm = result.bpm
+        lines.append(f"\n  {colorizer.wrap('BPM:', 'BOLD')} среднее {bpm['average']:.1f}, медиана {bpm['median']:.1f}, округлённое {bpm['rounded']}")
+        lines.append(f"  {colorizer.wrap('Диапазон:', 'BOLD')} {bpm['range'][0]:.1f} – {bpm['range'][1]:.1f}")
 
-    # НОВОЕ: Вывод жанра
+    # ИЗМЕНЕНО: Жанр (новая иконка 🏷️ и цвет CYAN)
     if result.genre and 'error' not in result.genre:
-        lines.append(f"\n{colorizer.wrap('🎚 ЖАНР:', 'BOLD')}")
-        lines.append(f"    Основной: {colorizer.wrap(result.genre.get('primary_genre', 'N/A'), 'MAGENTA')}")
-        lines.append(
-            f"    Альтернативные: {', '.join([g['genre'] for g in result.genre.get('predicted_genres', [])[1:]])}")
+        lines.append(f"\n{colorizer.wrap('🏷️ ЖАНР:', 'BOLD', 'CYAN')}")
+        lines.append(f"    Основной: {colorizer.wrap(result.genre.get('primary_genre', 'N/A'), 'CYAN')}")
+        alt_genres = ', '.join([g['genre'] for g in result.genre.get('predicted_genres', [])[1:]])
+        if alt_genres: lines.append(f"    Альтернативные: {alt_genres}")
 
-    # НОВОЕ: Вывод тембра
     if result.timbre and 'error' not in result.timbre:
         lines.append(f"\n{colorizer.wrap('🎨 ТЕМБР:', 'BOLD')}")
         lines.append(f"    Характеристики: {', '.join(result.timbre.get('timbral_traits', []))}")
         lines.append(f"    Спектральный центроид: {result.timbre.get('spectral_centroid_hz', 0):.0f} Hz")
 
-    if result.structure and 'error' not in result.structure: lines.append(
-        f"\n{colorizer.wrap('📊 СТРУКТУРА:', 'BOLD')} {result.structure.get('structure_map', 'N/A')}")
-    if result.chords and 'error' not in result.chords: lines.append(
-        f"{colorizer.wrap('🎸 АККОРДЫ:', 'BOLD')} {result.chords.get('progression', '')}")
+    if result.structure and 'error' not in result.structure:
+        lines.append(f"\n{colorizer.wrap('📊 СТРУКТУРА:', 'BOLD')}")
+        lines.append(f"    Секций: {result.structure.get('total_sections', 0)}")
+        lines.append(f"    Припевов: {result.structure.get('chorus_count', 0)}")
+        lines.append(f"    Структура: {result.structure.get('structure_map', 'N/A')}")
 
-    # НОВОЕ: Вывод нейросети
+    if result.rhythm and 'error' not in result.rhythm:
+        lines.append(f"\n{colorizer.wrap('🎼 РИТМ:', 'BOLD')}")
+        lines.append(f"    Размер: {result.rhythm.get('meter', 'N/A')}")
+        lines.append(f"    Регулярность: {result.rhythm.get('regularity', 0):.1%}")
+        lines.append(f"    Синкопирование: {result.rhythm.get('syncopation', 0):.2f}")
+
+    if result.vocal and 'error' not in result.vocal:
+        lines.append(f"\n{colorizer.wrap('🎤 ВОКАЛ:', 'BOLD')}")
+        lines.append(f"    Присутствие вокала: {result.vocal.get('vocal_presence_percent', 0):.1f}%")
+        if 'language' in result.vocal: lines.append(f"    Язык: {result.vocal['language']}")
+
+    if result.chords and 'error' not in result.chords:
+        lines.append(f"\n{colorizer.wrap('🎸 АККОРДЫ:', 'BOLD')}")
+        lines.append(f"    Метод: {result.chords.get('method', 'N/A')}")
+        lines.append(f"    Аккордов: {result.chords.get('chord_count', 0)}")
+        if 'progression' in result.chords: lines.append(f"    Прогрессия: {result.chords['progression']}")
+
+    if result.dynamics and 'error' not in result.dynamics:
+        lines.append(f"\n{colorizer.wrap('📈 ДИНАМИКА:', 'BOLD')}")
+        lines.append(f"    Динамический диапазон: {result.dynamics.get('dynamic_range_db', 0):.1f} dB")
+        lines.append(f"    Громких секций: {result.dynamics.get('loud_segments_count', 0)}")
+        lines.append(f"    Тихих секций: {result.dynamics.get('quiet_segments_count', 0)}")
+
     if result.neural_analysis and 'error' not in result.neural_analysis:
         lines.append(f"\n{colorizer.wrap('🧠 NEURAL API:', 'BOLD', 'BLUE')}")
-        for k, v in result.neural_analysis.items():
-            lines.append(f"    {k}: {v}")
+        for k, v in result.neural_analysis.items(): lines.append(f"    {k}: {v}")
     elif result.neural_analysis and 'error' in result.neural_analysis:
-        lines.append(
-            f"\n{colorizer.wrap('🧠 NEURAL API:', 'BOLD')} {colorizer.wrap(result.neural_analysis['error'], 'YELLOW')}")
+        lines.append(f"\n{colorizer.wrap('🧠 NEURAL API:', 'BOLD')} {colorizer.wrap(result.neural_analysis['error'], 'YELLOW')}")
 
     lines.append(colorizer.wrap('=' * 70, 'CYAN'))
     return "\n".join(lines)
@@ -1088,7 +1022,7 @@ def get_audio_files(paths: list[str], recursive: bool = False) -> list[str]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Продвинутый анализатор аудио v4.0 (Тембр, Жанр, Neural API)")
+    parser = argparse.ArgumentParser(description="Продвинутый анализатор аудио v4.1")
     parser.add_argument('files', nargs='*', help='Путь к аудиофайлу(ам) или папкам')
     parser.add_argument('--output', '-o', help='Папка для сохранения JSON')
     parser.add_argument('--no-save', action='store_true', help='Не сохранять JSON файлы')
@@ -1096,31 +1030,18 @@ def main():
     parser.add_argument('--parallel', '-p', type=int, default=1, help='Количество параллельных процессов')
     parser.add_argument('--no-color', action='store_true', help='Отключить цветной вывод')
     parser.add_argument('--recursive', '-r', action='store_true', help='Рекурсивный поиск аудио в папках')
-
-    # Новые флаги
     parser.add_argument('--no-timbre', action='store_true', help='Отключить анализ тембра')
     parser.add_argument('--no-genre', action='store_true', help='Отключить анализ жанров')
     parser.add_argument('--neural-api', action='store_true', help='Включить интеграцию с внешней нейросетью')
     parser.add_argument('--api-url', default='http://localhost:8000/predict', help='URL вашего Neural Network API')
-
     args = parser.parse_args()
     if not args.files: parser.print_help(); return
-
-    use_color = not args.no_color
-    colorizer = Colorizer(enabled=use_color)
-
-    config = AnalysisConfig(
-        analyze_timbre=not args.no_timbre,
-        analyze_genre=not args.no_genre,
-        use_neural_api=args.neural_api,
-        neural_api_url=args.api_url
-    )
-
+    colorizer = Colorizer(enabled=not args.no_color)
+    config = AnalysisConfig(analyze_timbre=not args.no_timbre, analyze_genre=not args.no_genre,
+                            use_neural_api=args.neural_api, neural_api_url=args.api_url)
     files_to_process = get_audio_files(args.files, recursive=args.recursive)
     if not files_to_process: print(colorizer.wrap("Не найдено аудиофайлов для обработки.", 'RED')); return
-
     if args.json: logging.disable(logging.CRITICAL)
-
     if args.parallel <= 1 or len(files_to_process) == 1:
         for filepath in tqdm(files_to_process, desc="Обработка", file=sys.stdout, dynamic_ncols=True,
                              disable=args.json):
