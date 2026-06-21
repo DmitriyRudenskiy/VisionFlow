@@ -4,9 +4,9 @@ import sys
 import argparse
 
 
-# ==================== БЫСТРАЯ ПРОВЕРКА АРГУМЕНТОВ (ДО ТЯЖЕЛЫХ ИМПОРТОВ) ====================
+# ==================== БЫСТРАЯ ПРОВЕРКА АРГУМЕНТОВ ====================
 def parse_args_early():
-    parser = argparse.ArgumentParser(description="AI-анализатор аудио v6.5.1 (Bugfixes & Thematic)")
+    parser = argparse.ArgumentParser(description="AI-анализатор аудио v6.6.1 (Final Hybrid)")
     parser.add_argument('files', nargs='*', help='Путь к аудиофайлу(ам)')
     parser.add_argument('--output', '-o', help='Папка для сохранения JSON')
     parser.add_argument('--no-save', action='store_true', help='Не сохранять JSON файлы')
@@ -15,7 +15,7 @@ def parse_args_early():
     parser.add_argument('--recursive', '-r', action='store_true', help='Рекурсивный поиск файлов в папках')
     parser.add_argument('--no-whisper', action='store_true', help='Отключить выделение и распознавание вокала')
     parser.add_argument('--whisper-model', default='openai/whisper-large-v3-turbo', help='Модель Whisper')
-    parser.add_argument('--theme', '-t', default='', help='Тема текста (перевод, фанфик, оригинал, протест, эпос)')
+    parser.add_argument('--theme', '-t', default='', help='Тема текста (перевод, фанфик, оригинал)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Подробный лог')
     parser.add_argument('--quiet', '-q', action='store_true', help='Только ошибки')
 
@@ -43,7 +43,7 @@ import numpy as np
 import librosa
 from scipy.signal import medfilt
 from scipy.fft import fft, ifft, next_fast_len
-from sklearn.cluster import KMeans
+from sklearn.cluster import AgglomerativeClustering
 import essentia
 import essentia.standard as es
 
@@ -58,7 +58,7 @@ try:
     WHISPER_AVAILABLE = True
 except ImportError:
     WHISPER_AVAILABLE = False
-    logger.warning("Transformers not installed. Install with: pip install transformers")
+    logger.warning("Transformers not installed.")
 
 import soundfile as sf
 from tqdm import tqdm
@@ -68,7 +68,7 @@ from demucs.apply import apply_model
 
 DEMUCS_AVAILABLE = True
 
-__version__ = "6.5.1"
+__version__ = "6.6.1"
 
 
 def clear_memory():
@@ -162,8 +162,8 @@ class AnalysisConfig:
     use_stress: bool = True;
     max_autocorr_duration: float = 60.0;
     chroma_reduction: Optional[int] = None
-    demucs_chunk_sec: float = 7.0
-    theme_prompt: str = ""  # ИСПРАВЛЕНИЕ v6.5.1: Аргумент темы
+    demucs_chunk_sec: float = 7.0;
+    theme_prompt: str = ""
 
 
 @dataclass
@@ -293,6 +293,18 @@ def get_rhyme_ending(text: str, lang: str) -> str:
     vowels = 'аеёиоуыэюяөү' if lang in ['ru', 'uk', 'be', 'bg', 'mn'] else 'aeiouy'
     matches = list(re.finditer(f'[{vowels}]', text))
     return text[-3:] if len(text) >= 3 else text if len(matches) < 2 else text[matches[-2].start():]
+
+
+def rhyme_similarity(ending1: str, ending2: str, use_phonetic: bool = True) -> float:
+    if not ending1 or not ending2: return 0.0
+    if use_phonetic: return phonetic_similarity(ending1, ending2)
+    matches = 0
+    for c1, c2 in zip(reversed(ending1), reversed(ending2)):
+        if c1 == c2:
+            matches += 1
+        else:
+            break
+    return matches / max(len(ending1), len(ending2), 1)
 
 
 # ==================== КЛАССЫ ТОНАЛЬНОСТИ ====================
@@ -499,101 +511,129 @@ class SectionAnalyzer:
 
     def analyze(self) -> dict:
         try:
-            c, sr, hl, d = self.features.chroma, self.features.sr, 512, self.features.duration
+            c, sr, hl = self.features.chroma, self.features.sr, 512
 
-            # ИСПРАВЛЕНИЕ v6.5.1: spectral_centroid и zcr уже 1D массивы, не нужно брать [0]
-            # Также добавлен hop_length=512 для синхронизации с хромой
-            rms_frames = librosa.feature.rms(y=self.features.y, frame_length=2048, hop_length=512)[0]
-            centroid_frames = self.features.spectral_centroid if self.features.spectral_centroid is not None else np.zeros(
-                len(rms_frames))
-            zcr_frames = self.features.zero_crossing_rate if self.features.zero_crossing_rate is not None else np.zeros(
-                len(rms_frames))
-
-            # Жесткая проверка минимальной длины для предотвращения tuple index out of range
-            min_len = min(c.shape[1], len(rms_frames), len(centroid_frames), len(zcr_frames))
-            if min_len < 10: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
+            rms_frames = librosa.feature.rms(y=self.features.y, frame_length=2048, hop_length=hl)[0]
+            min_len = min(c.shape[1], len(rms_frames))
+            if min_len < 20: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
 
             c = c[:, :min_len]
             rms_frames = rms_frames[:min_len]
-            centroid_frames = centroid_frames[:min_len]
-            zcr_frames = zcr_frames[:min_len]
 
-            rms_norm = (rms_frames - np.min(rms_frames)) / (np.max(rms_frames) - np.min(rms_frames) + 1e-10)
-            cent_norm = (centroid_frames - np.min(centroid_frames)) / (
-                    np.max(centroid_frames) - np.min(centroid_frames) + 1e-10)
-            zcr_norm = (zcr_frames - np.min(zcr_frames)) / (np.max(zcr_frames) - np.min(zcr_frames) + 1e-10)
+            beat_times = librosa.frames_to_time(self.features.beat_frames, sr=sr)
+            if len(beat_times) >= 4:
+                bar_duration = np.median(np.diff(beat_times)) * 4
+            else:
+                bar_duration = 4 * (60.0 / (self.features.tempo if self.features.tempo > 0 else 120))
 
-            sf = int(self.config.segment_duration_sec * sr / hl)
-            if sf >= min_len: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
+            segment_duration = bar_duration * 4
+            sf = int(segment_duration * sr / hl)
+            if sf < 10: sf = int(8.0 * sr / hl)
+
             segs, times = [], []
             for i in range(0, min_len - sf, sf):
                 seg_chroma = np.mean(c[:, i:i + sf], axis=1)
-                seg_rms = np.mean(rms_norm[i:i + sf])
-                seg_cent = np.mean(cent_norm[i:i + sf])
-                seg_zcr = np.mean(zcr_norm[i:i + sf])
-                segs.append(np.concatenate([seg_chroma, [seg_rms, seg_cent, seg_zcr]]))
-                times.append((librosa.frames_to_time(i, sr=sr, hop_length=hl),
-                              librosa.frames_to_time(i + sf, sr=sr, hop_length=hl)))
+                seg_rms = np.mean(rms_frames[i:i + sf])
+                seg_chroma = seg_chroma / (np.linalg.norm(seg_chroma) + 1e-10)
+                segs.append(np.concatenate([seg_chroma, [seg_rms]]))
+                start_t = librosa.frames_to_time(i, sr=sr, hop_length=hl)
+                end_t = librosa.frames_to_time(i + sf, sr=sr, hop_length=hl)
+                times.append((start_t, end_t))
+
             if len(segs) < 3: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
 
-            labels = medfilt(
-                KMeans(n_clusters=min(5, len(segs)), random_state=42, n_init='auto').fit_predict(np.array(segs)),
-                kernel_size=3).astype(int)
-            rl = {l for l, cnt in Counter(labels).items() if cnt >= 2}
+            X = np.array(segs)
+            max_rms = np.max(X[:, 12])
+            if max_rms > 0: X[:, 12] = X[:, 12] / max_rms
 
-            # Энергия для определения припева (используем только RMS из сегмента, индекс 12)
-            en = np.array([s[12] for s in segs])
-            p70, p30 = np.percentile(en, 70), np.percentile(en, 30)
-            raw, cl, cs, ces, cec = [], labels[0], times[0][0], en[0], 1
-            for i in range(1, len(labels)):
-                if labels[i] != cl or i == len(labels) - 1:
-                    ce = times[i - 1][1] if labels[i] != cl else times[i][1]
-                    se = ces / cec;
-                    ir = cl in rl
-                    if cs < 8:
-                        l = "Intro"
-                    elif ce > d - 8:
-                        l = "Outro"
-                    elif ir and se > p70:
-                        l = "Chorus"
-                    elif ir and se < p30:
-                        l = "Bridge"
-                    elif se < p30:
-                        l = "Breakdown"
-                    else:
-                        l = "Verse"
-                    raw.append({'label': l, 'start_time': round(cs, 2), 'end_time': round(ce, 2),
-                                'duration': round(ce - cs, 2), 'cluster_id': int(cl), 'energy': round(float(se), 2)})
-                    cl, cs, ces, cec = labels[i], times[i][0], en[i], 1
+            clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=1.2, metric='euclidean',
+                                                 linkage='ward')
+            labels = clustering.fit_predict(X)
+
+            cluster_stats = {}
+            for c_id in set(labels):
+                indices = [i for i, l in enumerate(labels) if l == c_id]
+                cluster_stats[c_id] = {
+                    'count': len(indices),
+                    'energy': np.mean([segs[i][12] for i in indices]),
+                    'positions': indices
+                }
+
+            sorted_clusters = sorted(cluster_stats.items(), key=lambda x: x[1]['energy'], reverse=True)
+            median_energy = np.median([s['energy'] for s in cluster_stats.values()])
+
+            label_map = {}
+            chorus_assigned = False
+            verse_assigned = False
+
+            for c_id, stats in sorted_clusters:
+                if stats['positions'][0] == 0 and stats['count'] == 1:
+                    label_map[c_id] = "Intro"
+                elif stats['positions'][-1] == len(labels) - 1 and stats['count'] == 1:
+                    label_map[c_id] = "Outro"
+                elif stats['count'] >= 2 and not chorus_assigned and stats['energy'] > median_energy:
+                    label_map[c_id] = "Chorus"
+                    chorus_assigned = True
+                elif stats['count'] >= 2 and not verse_assigned:
+                    label_map[c_id] = "Verse"
+                    verse_assigned = True
+                elif stats['count'] == 1:
+                    label_map[c_id] = "Bridge"
                 else:
-                    ces += en[i]; cec += 1
-            merged, ms2 = [], self.config.min_section_duration
-            for s in raw:
+                    label_map[c_id] = "Verse"
+
+            raw_sections = []
+            for i, (label_id, (start_t, end_t)) in enumerate(zip(labels, times)):
+                raw_sections.append({
+                    'label': label_map.get(label_id, "Unknown"),
+                    'start_time': round(start_t, 2),
+                    'end_time': round(end_t, 2),
+                    'duration': round(end_t - start_t, 2),
+                    'cluster_id': int(label_id),
+                    'energy': round(float(segs[i][12]), 3)
+                })
+
+            merged = []
+            for s in raw_sections:
                 if not merged:
                     merged.append(s.copy())
                 else:
                     la = merged[-1]
-                    if s['duration'] < 8 or (s['duration'] < ms2 and la['label'] == s['label']):
-                        la['end_time'], la['duration'] = s['end_time'], round(s['end_time'] - la['start_time'], 2)
+                    if la['label'] == s['label']:
+                        la['end_time'] = s['end_time']
+                        la['duration'] = round(s['end_time'] - la['start_time'], 2)
                     else:
                         merged.append(s.copy())
-            fs = []
+
+            # === ПРАВКА v6.6.1 #1: Разбивка секций >32с пополам ===
+            final_sections = []
             for s in merged:
-                if s['duration'] > 32.0 and fs:
-                    sp = s['start_time'] + 32.0
-                    fs.extend([{'label': s['label'], 'start_time': s['start_time'], 'end_time': sp, 'duration': 32.0,
-                                'cluster_id': s.get('cluster_id', -1), 'energy': s['energy']},
-                               {'label': s['label'], 'start_time': sp, 'end_time': s['end_time'],
-                                'duration': round(s['end_time'] - sp, 2), 'cluster_id': s.get('cluster_id', -1),
-                                'energy': s['energy']}])
+                if s['duration'] > 32.0:
+                    sp = s['start_time'] + s['duration'] / 2
+                    final_sections.append({
+                        'label': s['label'], 'start_time': s['start_time'], 'end_time': round(sp, 2),
+                        'duration': round(sp - s['start_time'], 2), 'cluster_id': s['cluster_id'], 'energy': s['energy']
+                    })
+                    final_sections.append({
+                        'label': s['label'], 'start_time': round(sp, 2), 'end_time': s['end_time'],
+                        'duration': round(s['end_time'] - sp, 2), 'cluster_id': s['cluster_id'], 'energy': s['energy']
+                    })
                 else:
-                    fs.append(s)
+                    final_sections.append(s)
+
             be = self.features.tempo if self.features.tempo > 0 else 120;
             bs = 60.0 / be
-            for s in fs: b = s['duration'] / bs; s['estimated_bars'], s['estimated_beats'] = round(b / 4.0, 1), round(b,
-                                                                                                                      1)
-            return {'sections': fs, 'structure_map': " → ".join([s['label'] for s in fs]),
-                    'chorus_count': sum(1 for s in fs if s['label'] == "Chorus"), 'total_sections': len(fs)}
+            for s in final_sections:
+                b = s['duration'] / bs
+                s['estimated_bars'], s['estimated_beats'] = round(b / 4.0, 1), round(b, 1)
+
+            return {
+                'sections': final_sections,
+                'structure_map': " → ".join([s['label'] for s in final_sections]),
+                'chorus_count': sum(1 for s in final_sections if s['label'] == "Chorus"),
+                'total_sections': len(final_sections),
+                'unique_clusters': len(set(labels))
+            }
         except Exception as e:
             return {'error': str(e), 'sections': []}
 
@@ -668,16 +708,12 @@ class DynamicsAnalyzer:
 
     def analyze(self) -> dict:
         try:
-            # ИСПРАВЛЕНИЕ v6.5.1: Убран аргумент sr=self.features.sr
             rms = librosa.feature.rms(y=self.features.y, frame_length=2048, hop_length=512)[0]
             rms_db = librosa.amplitude_to_db(rms, ref=np.max)
             dynamic_range = float(np.percentile(rms_db, 95) - np.percentile(rms_db, 5))
-
-            # Расчет кадров в секунду (fps) для правильного расчета громкости по секундам
             fps = self.features.sr / 512.0
             rms_sec = [np.mean(rms[max(0, int(i * fps - fps // 2)):int(i * fps + fps // 2)]) for i in
                        range(int(self.features.duration))]
-
             climax_time = int(np.argmax(rms_sec)) if rms_sec else 0
             drops = []
             rms_sec_arr = np.array(rms_sec)
@@ -747,12 +783,8 @@ class TextureAnalyzer:
         try:
             zcr = np.mean(self.features.zero_crossing_rate) if self.features.zero_crossing_rate is not None else 0
             contrast = np.mean(self.features.spectral_contrast) if self.features.spectral_contrast is not None else 0
-
-            # ИСПРАВЛЕНИЕ v6.5.1: RMS Variance для детекта перегруженных гитар (The Hu)
             rms = librosa.feature.rms(y=self.features.y, frame_length=2048, hop_length=512)[0]
             rms_variance = np.var(rms)
-
-            # The Hu has heavy distortion but low pitch -> low ZCR sometimes, but high RMS variance
             if rms_variance > 0.01 or zcr > 0.04:
                 texture = "dense/distorted (Heavy Rock/Folk Metal)"
             elif contrast > 25:
@@ -772,7 +804,6 @@ class GenreAnalyzer:
 
     def analyze(self) -> dict:
         try:
-            # ИСПРАВЛЕНИЕ v6.5.1: Добавлена эвристика для Hunnu Rock / Folk Metal
             if self.vocal_result.get('throat_singing_likely'):
                 genre = "Hunnu Rock / Folk Metal"
             elif self.features.spectral_centroid is not None and np.mean(self.features.spectral_centroid) > 3000:
@@ -805,8 +836,6 @@ class VocalAnalyzer:
             model = AutoModelForSpeechSeq2Seq.from_pretrained(self.whisper_model_name, dtype=td, low_cpu_mem_usage=True,
                                                               cache_dir=cd).to(dev)
             proc = AutoProcessor.from_pretrained(self.whisper_model_name, cache_dir=cd)
-
-            # ИСПРАВЛЕНИЕ v6.5.1: Убран clean_up_tokenization_spaces (удален в новых версиях transformers)
             self._whisper_pipe_cache[self.whisper_model_name] = pipeline(
                 "automatic-speech-recognition",
                 model=model,
@@ -925,58 +954,155 @@ class VocalAnalyzer:
             clear_memory()
 
             chunks = res.get("chunks", [])
+
             beat_times = librosa.frames_to_time(self.features.beat_frames, sr=self.features.sr)
-            bar_duration = np.median(np.diff(beat_times)) * 4 if len(beat_times) >= 4 else 4 * (
-                    60.0 / self.features.tempo)
+            if len(beat_times) >= 4:
+                bar_duration = np.median(np.diff(beat_times)) * 4
+            else:
+                bar_duration = 4 * (60.0 / (self.features.tempo if self.features.tempo > 0 else 120))
+
+            bar_times = np.arange(0, self.features.duration + bar_duration, bar_duration)
 
             syllable_grid = []
             lines = []
-            current_line = {'text': '', 'syllables': 0, 'start_bar': 0, 'end_bar': 0}
-            prev_end = 0.0
+            current_line = {'text': '', 'syllables': 0, 'start_time': 0, 'end_time': 0, 'break_reason': 'start'}
+            prev_word_end = 0.0
+            line_start_bar = 0
+
             for c in chunks:
                 text = c.get("text", "").strip()
                 if not text: continue
                 timestamp = c.get("timestamp", (0, 0))
-                start = timestamp[0] if timestamp[0] is not None else prev_end
+                start = timestamp[0] if timestamp[0] is not None else prev_word_end
                 end = timestamp[1] if timestamp[1] is not None else start + 1.0
 
-                start_bar = round(start / bar_duration)
-                end_bar = round(end / bar_duration)
+                start_bar_idx = np.searchsorted(bar_times, start)
+                end_bar_idx = np.searchsorted(bar_times, end)
 
-                pause_duration = start - prev_end
-                if pause_duration > 1.2 and current_line['syllables'] > 0:
+                pause = start - prev_word_end
+
+                if not current_line['text']:
+                    current_line['start_time'] = start
+                    line_start_bar = start_bar_idx
+
+                bars_in_line = end_bar_idx - line_start_bar
+                current_syllables = current_line['syllables'] + get_syllables(text, lang)
+
+                # === ПРАВКА v6.6.1 #4: Порог паузы 1.5с → 0.8с ===
+                new_line = False
+                break_reason = ""
+                if pause > 0.8 and current_line['syllables'] > 0:
+                    new_line = True;
+                    break_reason = "pause"
+                elif current_line['syllables'] >= 6 and bars_in_line >= 2:
+                    new_line = True;
+                    break_reason = "bars"
+                elif bars_in_line >= 4 and current_line['syllables'] > 0:
+                    new_line = True;
+                    break_reason = "bars"
+                elif current_syllables > 16:
+                    new_line = True;
+                    break_reason = "syllables"
+
+                if new_line and current_line['syllables'] > 0:
+                    current_line['end_time'] = prev_word_end
+                    current_line['break_reason'] = break_reason
                     lines.append(current_line)
-                    current_line = {'text': text, 'syllables': get_syllables(text, lang), 'start_bar': start_bar,
-                                    'end_bar': end_bar}
+                    current_line = {'text': text, 'syllables': get_syllables(text, lang), 'start_time': start,
+                                    'end_time': end, 'break_reason': 'start'}
+                    line_start_bar = start_bar_idx
                 else:
                     current_line['text'] += (" " if current_line['text'] else "") + text
-                    current_line['syllables'] += get_syllables(text, lang)
-                    current_line['end_bar'] = end_bar
+                    current_line['syllables'] = current_syllables
+                    current_line['end_time'] = end
 
                 syllable_grid.append({'text': text, 'syllables': get_syllables(text, lang), 'start': round(start, 2),
-                                      'end': round(end, 2), 'bars': end_bar - start_bar})
-                prev_end = end
-            if current_line['syllables'] > 0: lines.append(current_line)
+                                      'end': round(end, 2)})
+                prev_word_end = end
+
+            if current_line['syllables'] > 0:
+                current_line['end_time'] = prev_word_end
+                current_line['break_reason'] = "end"
+                lines.append(current_line)
 
             meter_info = "Не определена"
             avg_syllables = 0
+            rhyme_scheme = []
+            rhyme_pattern = "Free"
+
             if lines:
-                syl_counts = [l['syllables'] for l in lines if l['syllables'] >= 3]
+                syl_counts = [l['syllables'] for l in lines if 3 <= l['syllables'] <= 20]
                 if syl_counts:
                     avg_syllables = np.mean(syl_counts)
                     common_meters = [6, 8, 10, 11, 12, 14]
                     best_meter = min(common_meters, key=lambda x: abs(x - avg_syllables))
                     meter_info = f"~{best_meter} слогов (среднее {avg_syllables:.1f})"
 
+                endings = []
+                for l in lines:
+                    words_list = l['text'].split()
+                    if words_list:
+                        endings.append(get_rhyme_ending(words_list[-1], lang))
+                    else:
+                        endings.append("")
+
+                letters = {}
+                next_letter = ord('A')
+                for end in endings:
+                    if not end:
+                        rhyme_scheme.append('?')
+                        continue
+                    found = False
+                    for known_end, letter_code in letters.items():
+                        if rhyme_similarity(end, known_end, use_phonetic=True) > 0.6:
+                            rhyme_scheme.append(chr(letter_code))
+                            found = True
+                            break
+                    if not found:
+                        rhyme_scheme.append(chr(next_letter))
+                        letters[end] = next_letter
+                        next_letter += 1
+                        if next_letter > ord('Z'): next_letter = ord('A')
+
+                scheme_str = "".join(rhyme_scheme).replace('?', '')
+                if len(scheme_str) >= 4:
+                    if scheme_str.startswith("AABB") or "AABB" in scheme_str:
+                        rhyme_pattern = "AABB (Парная)"
+                    elif scheme_str.startswith("ABAB") or "ABAB" in scheme_str:
+                        rhyme_pattern = "ABAB (Перекрестная)"
+                    elif scheme_str.startswith("ABBA") or "ABBA" in scheme_str:
+                        rhyme_pattern = "ABBA (Опоясывающая)"
+                    elif len(set(scheme_str)) == 1:
+                        rhyme_pattern = "AAAA (Моно-рифма)"
+
+            # === ПРАВКА v6.6.1 #3: lines_per_verse ===
+            lines_per_verse = 4
+            if len(lines) >= 8:
+                lines_per_verse = 4 if len(lines) % 4 == 0 else (8 if len(lines) % 8 == 0 else 4)
+
             throat_singing_likely = is_hallucination or (
                     not txt and self._vocal_audio is not None and np.sqrt(np.mean(self._vocal_audio ** 2)) > 0.01)
 
-            return {'text': txt, 'language': lang, 'word_count': len(txt.split()),
-                    'syllable_count': get_syllables(txt, lang), 'chunks_count': len(chunks),
-                    'is_hallucination': is_hallucination, 'syllable_grid': syllable_grid, 'lines': lines,
-                    'meter': meter_info, 'avg_syllables_per_line': round(avg_syllables, 1),
-                    'throat_singing_likely': throat_singing_likely, 'bar_duration_sec': round(float(bar_duration), 2)}
+            return {
+                'text': txt,
+                'language': lang,
+                'word_count': len(txt.split()),
+                'syllable_count': get_syllables(txt, lang),
+                'chunks_count': len(chunks),
+                'is_hallucination': is_hallucination,
+                'syllable_grid': syllable_grid,
+                'lines': lines,
+                'lines_count': len(lines),
+                'meter': meter_info,
+                'avg_syllables_per_line': round(avg_syllables, 1),
+                'rhyme_scheme': rhyme_scheme,
+                'rhyme_pattern': rhyme_pattern,
+                'lines_per_verse': lines_per_verse,
+                'throat_singing_likely': throat_singing_likely,
+                'bar_duration_sec': round(float(bar_duration), 2)
+            }
         except Exception as e:
+            logger.error(f"Transcription error: {e}")
             return {'text': '', 'error': str(e)}
 
     def analyze(self) -> dict:
@@ -1063,8 +1189,6 @@ class MusicAnalyzer:
             if self.config.analyze_contour: er.contour = ContourAnalyzer(f).analyze()
             if self.config.analyze_timbre: er.timbre = TimbreAnalyzer(f).analyze()
             if self.config.analyze_texture: er.texture = TextureAnalyzer(f).analyze()
-
-            # Genre Analyzer использует результат вокала (детект горлового пения)
             if self.config.analyze_genre: er.genre = GenreAnalyzer(f, er.vocal).analyze()
 
             er.theme_hints = self._generate_theme_hints(er.to_dict())
@@ -1105,8 +1229,16 @@ def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
     if result.rhythm: lines.append(
         f"🥁 Ритм: {result.rhythm.get('meter', '?')} | Syncopation: {result.rhythm.get('syncopation', 0)}")
     if result.genre: lines.append(f"🎸 Жанр: {result.genre.get('genre_class', '?')}")
-    if result.structure and 'structure_map' in result.structure: lines.append(
-        f"🏗 Структура: {result.structure['structure_map']}")
+
+    if result.structure and 'structure_map' in result.structure:
+        lines.append(f"🏗 Структура: {result.structure['structure_map']}")
+        lines.append(f"🧩 Уникальных кластеров: {result.structure.get('unique_clusters', '?')}")
+
+        # === БОНУС v6.6.1: Детальный вывод секций ===
+        for s in result.structure.get('sections', []):
+            lines.append(
+                f"   [{s['label']:8s}] {s['start_time']:6.1f}–{s['end_time']:6.1f}s ({s['duration']:5.1f}s, ~{s.get('estimated_bars', '?'):>4} тактов, E={s.get('energy', '?')})")
+
     if result.chords and 'chord_progression' in result.chords and result.chords['chord_progression']:
         prog = [c['chord'] for c in result.chords['chord_progression'][:8]]
         lines.append(f"🎸 Аккорды: {' -> '.join(prog)}...")
@@ -1119,7 +1251,10 @@ def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
         if result.vocal.get('text'):
             lines.append(f"🎤 Текст: {result.vocal['text'][:100]}...")
             lines.append(
-                f"📏 Метрика: {result.vocal.get('meter', '?')} | Такт: {result.vocal.get('bar_duration_sec', '?')}с")
+                f"📏 Метрика: {result.vocal.get('meter', '?')} | Такт: {result.vocal.get('bar_duration_sec', '?')}с | Строк: {result.vocal.get('lines_count', 0)}")
+            lines.append(
+                f"🎼 Рифмовка: {result.vocal.get('rhyme_pattern', '?')} ({''.join(result.vocal.get('rhyme_scheme', []))})")
+            lines.append(f"📐 Строк в куплете: ~{result.vocal.get('lines_per_verse', '?')}")
         elif result.vocal.get('throat_singing_likely'):
             lines.append(f"🎤 Вокал: Обнаружено горловое пение (текст не распознан)")
         elif not result.vocal.get('has_vocals'):
