@@ -4,29 +4,15 @@ import sys
 import argparse
 
 
-# ==================== БЫСТРАЯ ПРОВЕРКА АРГУМЕНТОВ ====================
-def parse_args_early():
-    parser = argparse.ArgumentParser(description="AI-анализатор аудио v6.6.1 (Final Hybrid)")
-    parser.add_argument('files', nargs='*', help='Путь к аудиофайлу(ам)')
-    parser.add_argument('--output', '-o', help='Папка для сохранения JSON')
-    parser.add_argument('--no-save', action='store_true', help='Не сохранять JSON файлы')
-    parser.add_argument('--json', action='store_true', help='Выводить только сырой JSON в консоль')
-    parser.add_argument('--no-color', action='store_true', help='Отключить цвета в консоли')
-    parser.add_argument('--recursive', '-r', action='store_true', help='Рекурсивный поиск файлов в папках')
-    parser.add_argument('--no-whisper', action='store_true', help='Отключить выделение и распознавание вокала')
-    parser.add_argument('--whisper-model', default='openai/whisper-large-v3-turbo', help='Модель Whisper')
-    parser.add_argument('--theme', '-t', default='', help='Тема текста (перевод, фанфик, оригинал)')
+# ==================== ПАРСИНГ АРГУМЕНТОВ ====================
+def parse_args():
+    parser = argparse.ArgumentParser(description="AI-анализатор аудио v6.6.2 (Optimized)")
+    parser.add_argument('file', help='Путь к аудиофайлу')
     parser.add_argument('--verbose', '-v', action='store_true', help='Подробный лог')
-    parser.add_argument('--quiet', '-q', action='store_true', help='Только ошибки')
-
-    args = parser.parse_args()
-    if not args.files:
-        parser.print_help()
-        sys.exit(0)
-    return args
+    return parser.parse_args()
 
 
-EARLY_ARGS = parse_args_early()
+args = parse_args()
 
 # ==================== ТЯЖЕЛЫЕ ИМПОРТЫ ====================
 import json
@@ -68,7 +54,10 @@ from demucs.apply import apply_model
 
 DEMUCS_AVAILABLE = True
 
-__version__ = "6.6.1"
+__version__ = "6.6.2"
+
+# Жестко заданная модель Whisper
+WHISPER_MODEL_NAME = "openai/whisper-large-v3-turbo"
 
 
 def clear_memory():
@@ -82,13 +71,8 @@ def clear_memory():
         torch.cuda.empty_cache()
 
 
-def setup_logging(verbose: bool = False, quiet: bool = False):
-    if quiet:
-        level = logging.ERROR
-    elif verbose:
-        level = logging.DEBUG
-    else:
-        level = logging.INFO
+def setup_logging(verbose: bool = False):
+    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                         datefmt='%Y-%m-%d %H:%M:%S', force=True)
     logger.setLevel(level)
@@ -140,8 +124,6 @@ class AnalysisConfig:
     bpm_min: int = 40;
     bpm_max: int = 220;
     use_whisper: bool = True
-    whisper_model: str = "openai/whisper-large-v3-turbo";
-    whisper_cache_dir: Optional[str] = None
     analyze_sections: bool = True;
     analyze_rhythm: bool = True;
     analyze_vocal: bool = True
@@ -151,19 +133,13 @@ class AnalysisConfig:
     analyze_genre: bool = True;
     analyze_contour: bool = True;
     analyze_texture: bool = True
-    use_neural_api: bool = False;
-    neural_api_url: str = "http://localhost:8000/predict"
     vocal_backend: str = "demucs";
     segment_duration_sec: float = 8.0;
     min_section_duration: float = 10.0
     vocal_min_frames: float = 0.25;
     vocal_gap_frames: float = 0.3;
-    use_phonetic: bool = True
-    use_stress: bool = True;
-    max_autocorr_duration: float = 60.0;
-    chroma_reduction: Optional[int] = None
-    demucs_chunk_sec: float = 7.0;
-    theme_prompt: str = ""
+    max_autocorr_duration: float = 60.0
+    demucs_chunk_sec: float = 7.0
 
 
 @dataclass
@@ -204,11 +180,8 @@ class ExtendedResult:
     dynamics: dict | None = None;
     timbre: dict | None = None
     genre: dict | None = None;
-    neural_analysis: dict | None = None;
     contour: dict | None = None;
     texture: dict | None = None
-    theme_hints: str = "";
-    theme_prompt: str = "";
     all_results: list = field(default_factory=list);
     voting: dict = field(default_factory=dict);
     error: str | None = None
@@ -226,17 +199,6 @@ class NumpyJSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-class Colorizer:
-    _codes = {'RED': '\033[91m', 'GREEN': '\033[92m', 'YELLOW': '\033[93m', 'BLUE': '\033[94m', 'MAGENTA': '\033[95m',
-              'CYAN': '\033[96m', 'WHITE': '\033[97m', 'BOLD': '\033[1m', 'UNDERLINE': '\033[4m', 'RESET': '\033[0m'}
-
-    def __init__(self, enabled: bool = True): self.enabled = enabled and sys.stdout.isatty()
-
-    def wrap(self, text: str, *styles: str) -> str:
-        if not self.enabled: return str(text)
-        return f"{''.join(self._codes.get(s, '') for s in styles)}{text}{self._codes['RESET']}"
-
-
 def normalize_key(key_name: str) -> str:
     try:
         return NOTE_NAMES[librosa.note_to_midi(key_name) % 12]
@@ -249,33 +211,6 @@ def normalize_key(key_name: str) -> str:
 def normalize_audio(y: np.ndarray, target_db: float = -3.0) -> np.ndarray:
     peak = np.max(np.abs(y))
     return y if peak == 0 else y * (10 ** (target_db / 20.0) / peak)
-
-
-def get_audio_files(paths: list[str], recursive: bool = False) -> list[Path]:
-    files = []
-    for p in paths:
-        path = Path(p)
-        if path.is_file() and path.suffix.lower() in AUDIO_EXTS:
-            files.append(path)
-        elif path.is_dir():
-            pattern = path.rglob('*') if recursive else path.glob('*')
-            files.extend([f for f in pattern if f.is_file() and f.suffix.lower() in AUDIO_EXTS])
-    return sorted(list(set(files)))
-
-
-def soundex(word: str) -> str:
-    word = word.upper();
-    first = word[0]
-    mapping = {'B': '1', 'F': '1', 'P': '1', 'V': '1', 'C': '2', 'G': '2', 'J': '2', 'K': '2', 'Q': '2', 'S': '2',
-               'X': '2', 'Z': '2', 'D': '3', 'T': '3', 'L': '4', 'M': '5', 'N': '5', 'R': '6'}
-    code = [first] + [mapping.get(ch, '0') for ch in word[1:]]
-    result = []
-    for c in code:
-        if not result or result[-1] != c: result.append(c)
-    return ''.join([result[0]] + [c for c in result[1:] if c != '0'])[:4].ljust(4, '0')
-
-
-def phonetic_similarity(s1: str, s2: str) -> float: return 1.0 if s1 and s2 and soundex(s1) == soundex(s2) else 0.0
 
 
 def get_syllables(text: str, lang: str) -> int:
@@ -297,7 +232,7 @@ def get_rhyme_ending(text: str, lang: str) -> str:
 
 def rhyme_similarity(ending1: str, ending2: str, use_phonetic: bool = True) -> float:
     if not ending1 or not ending2: return 0.0
-    if use_phonetic: return phonetic_similarity(ending1, ending2)
+    if use_phonetic: return 1.0 if ending1 and ending2 and soundex(ending1) == soundex(ending2) else 0.0
     matches = 0
     for c1, c2 in zip(reversed(ending1), reversed(ending2)):
         if c1 == c2:
@@ -305,6 +240,18 @@ def rhyme_similarity(ending1: str, ending2: str, use_phonetic: bool = True) -> f
         else:
             break
     return matches / max(len(ending1), len(ending2), 1)
+
+
+def soundex(word: str) -> str:
+    word = word.upper();
+    first = word[0]
+    mapping = {'B': '1', 'F': '1', 'P': '1', 'V': '1', 'C': '2', 'G': '2', 'J': '2', 'K': '2', 'Q': '2', 'S': '2',
+               'X': '2', 'Z': '2', 'D': '3', 'T': '3', 'L': '4', 'M': '5', 'N': '5', 'R': '6'}
+    code = [first] + [mapping.get(ch, '0') for ch in word[1:]]
+    result = []
+    for c in code:
+        if not result or result[-1] != c: result.append(c)
+    return ''.join([result[0]] + [c for c in result[1:] if c != '0'])[:4].ljust(4, '0')
 
 
 # ==================== КЛАССЫ ТОНАЛЬНОСТИ ====================
@@ -605,7 +552,7 @@ class SectionAnalyzer:
                     else:
                         merged.append(s.copy())
 
-            # === ПРАВКА v6.6.1 #1: Разбивка секций >32с пополам ===
+            # Разбивка секций >32с пополам
             final_sections = []
             for s in merged:
                 if s['duration'] > 32.0:
@@ -822,21 +769,20 @@ class VocalAnalyzer:
     def __init__(self, features: AudioFeatures, config: AnalysisConfig):
         self.features, self.config = features, config
         self.use_whisper = config.use_whisper and WHISPER_AVAILABLE
-        self.whisper_model_name, self.vocal_backend = config.whisper_model, config.vocal_backend
+        self.vocal_backend = config.vocal_backend
         self._vocal_audio = None
 
     def _get_whisper_pipe(self):
         if not WHISPER_AVAILABLE: return None
-        cd = self.config.whisper_cache_dir or os.environ.get("WHISPER_CACHE_DIR")
-        if self.whisper_model_name not in self._whisper_pipe_cache:
-            logger.info(f"🔄 Загрузка Whisper: '{self.whisper_model_name}'")
+        if WHISPER_MODEL_NAME not in self._whisper_pipe_cache:
+            logger.info(f"🔄 Загрузка Whisper: '{WHISPER_MODEL_NAME}'")
             dev = "cuda:0" if torch.cuda.is_available() else "mps" if getattr(torch.backends, "mps",
                                                                               None) is not None and torch.backends.mps.is_available() else "cpu"
             td = torch.float16 if dev == "cuda:0" else torch.float32
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(self.whisper_model_name, dtype=td, low_cpu_mem_usage=True,
-                                                              cache_dir=cd).to(dev)
-            proc = AutoProcessor.from_pretrained(self.whisper_model_name, cache_dir=cd)
-            self._whisper_pipe_cache[self.whisper_model_name] = pipeline(
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(WHISPER_MODEL_NAME, dtype=td, low_cpu_mem_usage=True).to(
+                dev)
+            proc = AutoProcessor.from_pretrained(WHISPER_MODEL_NAME)
+            self._whisper_pipe_cache[WHISPER_MODEL_NAME] = pipeline(
                 "automatic-speech-recognition",
                 model=model,
                 tokenizer=proc.tokenizer,
@@ -848,7 +794,7 @@ class VocalAnalyzer:
                 ignore_warning=True
             )
             logger.info("✅ Whisper загружен.")
-        return self._whisper_pipe_cache[self.whisper_model_name]
+        return self._whisper_pipe_cache[WHISPER_MODEL_NAME]
 
     def _get_demucs_model(self):
         if not DEMUCS_AVAILABLE: return None
@@ -988,7 +934,7 @@ class VocalAnalyzer:
                 bars_in_line = end_bar_idx - line_start_bar
                 current_syllables = current_line['syllables'] + get_syllables(text, lang)
 
-                # === ПРАВКА v6.6.1 #4: Порог паузы 1.5с → 0.8с ===
+                # Порог паузы 0.8с
                 new_line = False
                 break_reason = ""
                 if pause > 0.8 and current_line['syllables'] > 0:
@@ -1075,7 +1021,6 @@ class VocalAnalyzer:
                     elif len(set(scheme_str)) == 1:
                         rhyme_pattern = "AAAA (Моно-рифма)"
 
-            # === ПРАВКА v6.6.1 #3: lines_per_verse ===
             lines_per_verse = 4
             if len(lines) >= 8:
                 lines_per_verse = 4 if len(lines) % 4 == 0 else (8 if len(lines) % 8 == 0 else 4)
@@ -1115,26 +1060,6 @@ class VocalAnalyzer:
 class MusicAnalyzer:
     def __init__(self, config: AnalysisConfig | None = None):
         self.config = config or AnalysisConfig()
-
-    def _generate_theme_hints(self, res_dict: dict) -> str:
-        hints = []
-        user_theme = res_dict.get('theme_prompt', '')
-        if user_theme:
-            hints.insert(0, f"Запрос: {user_theme}")
-
-        genre = res_dict.get('genre', {}).get('genre_class', '')
-        if 'Hunnu' in genre or 'Folk' in genre:
-            hints.extend(["эпическая", "историческая", "кочевники", "степь", "призыв к битве"])
-        if res_dict.get('timbre', {}).get('timbre_class') == 'dark/deep':
-            hints.append("мрачная, героическая")
-        if res_dict.get('texture', {}).get('texture_class', '').startswith('dense'):
-            hints.append("агрессивная, стена звука, протест")
-        if res_dict.get('vocal', {}).get('throat_singing_likely'):
-            hints.extend(["шаманизм", "дух предков", "горловое пение"])
-        if res_dict.get('dynamics', {}).get('dynamic_range_db', 0) > 15:
-            hints.append("контрастная, нарастающая ярость")
-
-        return ", ".join(hints) if hints else "нейтральная, повествовательная"
 
     def _extract_features(self, file_path: str) -> AudioFeatures:
         logger.info(f"📂 Загрузка: {file_path}")
@@ -1178,8 +1103,7 @@ class MusicAnalyzer:
             er = ExtendedResult(file=file_path, key=bk, mode=bm, confidence=round(cf, 3), confidence_level=cl,
                                 votes=votes, total_methods=len(vr),
                                 bpm=BPMDetector.detect(f, self.config), duration_seconds=f.duration, sample_rate=f.sr,
-                                all_results=res, voting={f"{k[0]} {k[1]}": v for k, v in wv.items()},
-                                theme_prompt=self.config.theme_prompt)
+                                all_results=res, voting={f"{k[0]} {k[1]}": v for k, v in wv.items()})
 
             if self.config.analyze_sections: er.structure = SectionAnalyzer(f, self.config).analyze()
             if self.config.analyze_rhythm: er.rhythm = RhythmAnalyzer(f).analyze()
@@ -1191,8 +1115,6 @@ class MusicAnalyzer:
             if self.config.analyze_texture: er.texture = TextureAnalyzer(f).analyze()
             if self.config.analyze_genre: er.genre = GenreAnalyzer(f, er.vocal).analyze()
 
-            er.theme_hints = self._generate_theme_hints(er.to_dict())
-
             del f;
             clear_memory()
             return er
@@ -1203,28 +1125,22 @@ class MusicAnalyzer:
 
 
 # ==================== CLI ====================
-def process_file(filepath: Path, config: AnalysisConfig, save: bool, output_dir: Path | None = None) -> ExtendedResult:
-    analyzer = MusicAnalyzer(config)
+def process_file(filepath: Path) -> ExtendedResult:
+    analyzer = MusicAnalyzer()
     result = analyzer.analyze_file(str(filepath))
-    if save and output_dir:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        out_file = output_dir / f"{filepath.stem}_analysis.json"
-        with open(out_file, 'w', encoding='utf-8') as file:
-            json.dump(result.to_dict(), file, indent=2, ensure_ascii=False, cls=NumpyJSONEncoder)
+    # Сохраняем JSON в ту же директорию, что и исходный файл
+    output_file = filepath.with_suffix('.json')
+    with open(output_file, 'w', encoding='utf-8') as file:
+        json.dump(result.to_dict(), file, indent=2, ensure_ascii=False, cls=NumpyJSONEncoder)
     return result
 
 
-def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
+def format_result_output(result: ExtendedResult) -> str:
     lines = [
-        colorizer.wrap(f"\n🎵 Файл: {result.file}", "BOLD", "WHITE"),
-        colorizer.wrap(
-            f"Тональность: {result.key} {result.mode} ({result.confidence * 100:.1f}% - {result.confidence_level})",
-            "GREEN")
+        f"\n🎵 Файл: {result.file}",
+        f"Тональность: {result.key} {result.mode} ({result.confidence * 100:.1f}% - {result.confidence_level})"
     ]
-    if result.theme_prompt: lines.append(colorizer.wrap(f"🎯 Ваш запрос: {result.theme_prompt}", "MAGENTA"))
-    lines.append(colorizer.wrap(f"💡 Вайб/Тема: {result.theme_hints}", "CYAN"))
-
-    if result.error: lines.append(colorizer.wrap(f"⚠️ Ошибка: {result.error}", "RED"))
+    if result.error: lines.append(f"⚠️ Ошибка: {result.error}")
     if result.bpm: lines.append(f"⏱ BPM: {result.bpm}")
     if result.rhythm: lines.append(
         f"🥁 Ритм: {result.rhythm.get('meter', '?')} | Syncopation: {result.rhythm.get('syncopation', 0)}")
@@ -1233,8 +1149,6 @@ def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
     if result.structure and 'structure_map' in result.structure:
         lines.append(f"🏗 Структура: {result.structure['structure_map']}")
         lines.append(f"🧩 Уникальных кластеров: {result.structure.get('unique_clusters', '?')}")
-
-        # === БОНУС v6.6.1: Детальный вывод секций ===
         for s in result.structure.get('sections', []):
             lines.append(
                 f"   [{s['label']:8s}] {s['start_time']:6.1f}–{s['end_time']:6.1f}s ({s['duration']:5.1f}s, ~{s.get('estimated_bars', '?'):>4} тактов, E={s.get('energy', '?')})")
@@ -1267,9 +1181,8 @@ def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
     return "\n".join(lines)
 
 
-def main(args):
-    setup_logging(verbose=args.verbose, quiet=args.quiet)
-    colorizer = Colorizer(enabled=not args.no_color)
+def main():
+    setup_logging(verbose=args.verbose)
     import torch;
     import multiprocessing as mp
     torch.set_num_threads(1)
@@ -1277,25 +1190,15 @@ def main(args):
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
         pass
-    config = AnalysisConfig(
-        use_whisper=not args.no_whisper,
-        whisper_model=args.whisper_model,
-        theme_prompt=args.theme
-    )
-    files_to_process = get_audio_files(args.files, recursive=args.recursive)
-    if not files_to_process:
-        logger.error("Не найдено аудиофайлов.")
-        print(colorizer.wrap("Не найдено аудиофайлов.", 'RED'))
+
+    filepath = Path(args.file)
+    if not filepath.exists():
+        logger.error(f"Файл не найден: {filepath}")
         return
-    if args.json: logging.disable(logging.CRITICAL)
-    for filepath in tqdm(files_to_process, desc=f"Обработка v{__version__}", file=sys.stdout, dynamic_ncols=True,
-                         disable=args.json):
-        result = process_file(Path(filepath), config, not args.no_save, Path(args.output) if args.output else None)
-        if args.json:
-            print(json.dumps(result.to_dict(), ensure_ascii=False, cls=NumpyJSONEncoder))
-        else:
-            tqdm.write(format_result_output(result, colorizer))
+
+    result = process_file(filepath)
+    print(format_result_output(result))
 
 
 if __name__ == "__main__":
-    main(EARLY_ARGS)
+    main()
