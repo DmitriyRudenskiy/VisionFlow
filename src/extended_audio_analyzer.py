@@ -5,11 +5,12 @@ import sys
 import argparse
 import logging
 import warnings
+import tempfile
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import TypedDict, Optional
+from typing import TypedDict, Any
 import numpy as np
 
 # Отключаем специфичные предупреждения до импорта librosa
@@ -18,7 +19,7 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 # ==================== ВЕРСИЯ ====================
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 # ==================== ЗАВИСИМОСТИ ====================
 try:
@@ -36,6 +37,7 @@ except ImportError:
 
 try:
     from sklearn.cluster import KMeans
+
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -53,6 +55,7 @@ ESSENTIA_AVAILABLE = True
 whisper_available = False
 try:
     import whisper
+
     whisper_available = True
 except ImportError:
     pass
@@ -60,6 +63,7 @@ except ImportError:
 # Для записи wav в VocalAnalyzer
 try:
     import soundfile as sf
+
     SOUNDFILE_AVAILABLE = True
 except ImportError:
     SOUNDFILE_AVAILABLE = False
@@ -77,6 +81,20 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+
+# ==================== JSON ENCODER ====================
+class NumpyJSONEncoder(json.JSONEncoder):
+    """Безопасный энкодер для numpy типов при записи в JSON."""
+
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 
 # ==================== ЦВЕТНОЙ ВЫВОД ====================
@@ -123,16 +141,6 @@ METHOD_WEIGHTS = {
     'Essentia': 1.5,
 }
 
-CHORD_PROFILES_MAJOR = {
-    0: [1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0],
-    1: [0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0],
-    # ... остальные аккорды оставлены для полноты, но теперь не используются
-}
-CHORD_PROFILES_MINOR = {
-    0: [1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0],
-    1: [0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
-    # ... аналогично
-}
 
 # ==================== ТИПИЗАЦИЯ ====================
 class MethodResult(TypedDict, total=False):
@@ -149,7 +157,7 @@ class MethodResult(TypedDict, total=False):
 # ==================== DATACLASSES ====================
 @dataclass
 class AnalysisConfig:
-    sample_rate: int = 44100                    # Essentia использует 44100, теперь это стандарт
+    sample_rate: int = 44100  # Essentia использует 44100, теперь это стандарт
     trim_top_db: int = 20
     use_hpss: bool = True
     normalize_audio: bool = True
@@ -290,8 +298,8 @@ class KeyMethod:
 
 # ==================== МЕТОДЫ 1-4: Профили ====================
 class ProfileMethod(KeyMethod):
-    _maj_matrices = {}
-    _min_matrices = {}
+    _maj_matrices: dict = {}
+    _min_matrices: dict = {}
 
     def __init__(self, major_profile: np.ndarray, minor_profile: np.ndarray, method_name: str, features: AudioFeatures):
         super().__init__(features)
@@ -486,7 +494,6 @@ class EssentiaMethod(KeyMethod):
     weight = METHOD_WEIGHTS.get(name, 1.0)
 
     def detect(self) -> MethodResult:
-        # Essentia гарантированно доступна, убрана проверка
         try:
             audio = self.features.y.astype(np.float32)
             profiles = ['temperley', 'krumhansl', 'edma']
@@ -588,8 +595,6 @@ class BPMDetector:
 
 # ==================== АНАЛИЗАТОР СТРУКТУРЫ ====================
 class SectionAnalyzer:
-    """Анализ структуры песни: куплеты, припевы, бридж, инструменталы."""
-
     def __init__(self, features: AudioFeatures):
         self.features = features
 
@@ -600,7 +605,6 @@ class SectionAnalyzer:
         try:
             chroma = self.features.chroma
             sr = self.features.sr
-
             hop_length = 512
             segment_frames = int(2 * sr / hop_length)
 
@@ -626,6 +630,11 @@ class SectionAnalyzer:
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init='auto')
             labels = kmeans.fit_predict(segments)
 
+            # Предрасчет сумм энергий для всех сегментов
+            all_seg_energies = np.array([np.sum(s) for s in segments])
+            percentile_70 = np.percentile(all_seg_energies, 70)
+            percentile_30 = np.percentile(all_seg_energies, 30)
+
             sections = []
             current_label = labels[0]
             current_start = times[0][0]
@@ -636,15 +645,15 @@ class SectionAnalyzer:
                     current_end = times[end_idx - 1][1]
 
                     seg_indices = [j for j in range(len(labels)) if labels[j] == current_label]
-                    seg_energy = np.mean([np.sum(segments[j]) for j in seg_indices])
+                    seg_energy = np.mean([all_seg_energies[j] for j in seg_indices])
 
                     if current_start < 5:
                         label = "Intro"
                     elif current_end > self.features.duration - 5:
                         label = "Outro"
-                    elif seg_energy > np.percentile([np.sum(s) for s in segments], 70):
+                    elif seg_energy > percentile_70:
                         label = "Chorus"
-                    elif seg_energy < np.percentile([np.sum(s) for s in segments], 30):
+                    elif seg_energy < percentile_30:
                         label = "Bridge"
                     else:
                         label = "Verse"
@@ -680,8 +689,6 @@ class SectionAnalyzer:
 
 # ==================== АНАЛИЗАТОР РИТМА ====================
 class RhythmAnalyzer:
-    """Анализ ритмической структуры."""
-
     def __init__(self, features: AudioFeatures):
         self.features = features
 
@@ -710,6 +717,7 @@ class RhythmAnalyzer:
                     meter = "Free"
             else:
                 meter = "Unknown"
+                interval_variance = 0
 
             regularity = max(0, 1 - interval_variance * 10) if len(beat_times) > 1 else 0
 
@@ -739,15 +747,24 @@ class RhythmAnalyzer:
 class VocalAnalyzer:
     """Анализ вокала и лирики."""
 
+    # Кэшируем модель Whisper на уровне класса, чтобы не загружать её для каждого файла
+    _whisper_model_cache: dict = {}
+
     def __init__(self, features: AudioFeatures, use_whisper: bool = False, whisper_model: str = "base"):
         self.features = features
         self.use_whisper = use_whisper and whisper_available and SOUNDFILE_AVAILABLE
-        self.whisper_model = whisper_model
+        self.whisper_model_name = whisper_model
+
+    def _get_whisper_model(self):
+        if self.whisper_model_name not in self._whisper_model_cache:
+            self._whisper_model_cache[self.whisper_model_name] = whisper.load_model(self.whisper_model_name)
+        return self._whisper_model_cache[self.whisper_model_name]
 
     def analyze(self) -> dict:
         try:
             y = self.features.y
             sr = self.features.sr
+            hop_length = 512
 
             S = np.abs(librosa.stft(y))
             freqs = librosa.fft_frequencies(sr=sr)
@@ -763,7 +780,6 @@ class VocalAnalyzer:
             threshold = 0.3
             in_vocal = False
             start_time = 0
-            hop_length = 512
 
             for i, ratio in enumerate(vocal_ratio):
                 time = librosa.frames_to_time(i, sr=sr, hop_length=hop_length)
@@ -796,9 +812,7 @@ class VocalAnalyzer:
 
             if self.use_whisper:
                 try:
-                    model = whisper.load_model(self.whisper_model)
-                    # Исправлено: используем soundfile вместо librosa.output.write_wav
-                    import tempfile
+                    model = self._get_whisper_model()
                     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
                         sf.write(tmp.name, y, sr)
                         transcription = model.transcribe(tmp.name)
@@ -839,7 +853,7 @@ class VocalAnalyzer:
             return {'error': str(e)}
 
 
-# ==================== АНАЛИЗАТОР АККОРДОВ (только Essentia) ====================
+# ==================== АНАЛИЗАТОР АККОРДОВ (Essentia) ====================
 class ChordAnalyzer:
     """Анализ гармонической прогрессии – только через Essentia."""
 
@@ -849,31 +863,57 @@ class ChordAnalyzer:
     def analyze(self) -> dict:
         try:
             audio = self.features.y.astype(np.float32)
-            sr = float(self.features.sr)                     # обязательно float
+            sr = int(self.features.sr)
+            hop_size = 512
+            frame_size = 4096
 
-            # Извлекаем гармонические признаки (HPCP)
-            hpcp = es.HPCP(sampleRate=sr, minFrequency=40.0, maxFrequency=5000.0)(audio)
+            # Правильный пайплайн Essentia для HPCP
+            frame_generator = es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size)
+            windowing = es.Windowing(type='blackmanharris62')
+            spectrum = es.Spectrum()
+            spectral_peaks = es.SpectralPeaks(maxFrequency=5000.0, magnitudeThreshold=0.00001, minFrequency=40.0)
+            hpcp_extractor = es.HPCP(sampleRate=sr, minFrequency=40.0, maxFrequency=5000.0)
 
-            # Параметры, необходимые детектору аккордов
-            hopSize = 256                                      # стандартный шаг HPCP
+            hpcp_list = []
+            for frame in frame_generator:
+                spec = spectrum(windowing(frame))
+                freqs, mags = spectral_peaks(spec)
+                hpcp = hpcp_extractor(freqs, mags)
+                hpcp_list.append(hpcp)
 
-            # Выбираем доступный алгоритм
-            if hasattr(es, 'ChordsDetection'):
-                chord_detector = es.ChordsDetection()
-            elif hasattr(es, 'ChordDetection'):
-                chord_detector = es.ChordDetection()
-            else:
-                return {'error': 'No chord detection algorithm available'}
+            if not hpcp_list:
+                return {'error': 'No HPCP extracted'}
 
-            # ВАЖНО: передаём ТРИ аргумента (HPCP, hopSize, sampleRate)
-            chords, times = chord_detector(hpcp, hopSize, sr)
+            hpcp_array = np.array(hpcp_list)
 
-            # Формируем результат
+            # ChordsDetection принимает 2D массив HPCP (frames x 12)
+            chord_detector = es.ChordsDetection()
+            chords, strengths = chord_detector(hpcp_array)
+
+            # Группируем одинаковые подряд идущие аккорды для краткости
             chord_progression = []
-            for chord, time in zip(chords, times):
+            current_chord = None
+            current_start_time = 0.0
+
+            for i, chord in enumerate(chords):
+                time = i * hop_size / sr
+                if chord != current_chord:
+                    if current_chord is not None:
+                        chord_progression.append({
+                            'chord': str(current_chord),
+                            'start_time': round(float(current_start_time), 2),
+                            'end_time': round(float(time), 2)
+                        })
+                    current_chord = chord
+                    current_start_time = time
+
+            # Добавляем последний аккорд
+            if current_chord is not None:
+                final_time = len(chords) * hop_size / sr
                 chord_progression.append({
-                    'chord': str(chord),
-                    'time': round(float(time), 2)
+                    'chord': str(current_chord),
+                    'start_time': round(float(current_start_time), 2),
+                    'end_time': round(float(final_time), 2)
                 })
 
             return {
@@ -890,8 +930,6 @@ class ChordAnalyzer:
 
 # ==================== АНАЛИЗАТОР ДИНАМИКИ ====================
 class DynamicsAnalyzer:
-    """Анализ динамики и энергетического профиля."""
-
     def __init__(self, features: AudioFeatures):
         self.features = features
 
@@ -899,8 +937,8 @@ class DynamicsAnalyzer:
         try:
             y = self.features.y
             sr = self.features.sr
-
             hop_length = 512
+
             rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
             rms_db = librosa.amplitude_to_db(rms, ref=np.max)
 
@@ -1002,7 +1040,6 @@ class KeyDetector:
     def _load_audio(self) -> tuple[np.ndarray, np.ndarray, int, float]:
         logger.info(f"Loading audio: {self.filepath}")
         try:
-            # Essentia работает на 44100, поэтому теперь всегда 44100
             y, sr = librosa.load(str(self.filepath), sr=44100, mono=True)
 
             if len(y) == 0:
@@ -1028,12 +1065,14 @@ class KeyDetector:
 
     def _extract_features(self, y: np.ndarray, y_perc: np.ndarray, sr: int, duration: float) -> AudioFeatures:
         logger.info("Extracting global features...")
+        hop_length = 512
 
-        chroma = librosa.feature.chroma_cqt(y=y, sr=sr, bins_per_octave=36)
+        chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length, bins_per_octave=36)
         chroma = medfilt(chroma, kernel_size=(1, 3))
 
         fmin_bass = librosa.note_to_hz('C1')
-        bass_chroma = librosa.feature.chroma_cqt(y=y, sr=sr, bins_per_octave=36, fmin=fmin_bass, n_octaves=2)
+        bass_chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length, bins_per_octave=36, fmin=fmin_bass,
+                                                 n_octaves=2)
 
         try:
             tempo, beat_frames = librosa.beat.beat_track(y=y_perc, sr=sr)
@@ -1041,14 +1080,14 @@ class KeyDetector:
         except Exception:
             tempo, beat_frames = 0.0, np.array([])
 
-        onset_env = librosa.onset.onset_strength(y=y_perc, sr=sr)
+        onset_env = librosa.onset.onset_strength(y=y_perc, sr=sr, hop_length=hop_length)
 
         try:
-            cent = librosa.feature.spectral_centroid(y=y, sr=sr)
+            cent = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)
         except Exception:
             cent = None
         try:
-            contr = librosa.feature.spectral_contrast(y=y, sr=sr)
+            contr = librosa.feature.spectral_contrast(y=y, sr=sr, hop_length=hop_length)
         except Exception:
             contr = None
 
@@ -1069,10 +1108,10 @@ class KeyDetector:
             ChordVotingMethod(self.features),
             CircleOfFifthsMethod(self.features),
             SpectralMethod(self.features),
-            EssentiaMethod(self.features)      # всегда присутствует
+            EssentiaMethod(self.features)
         ]
 
-    def _run_extended_analysis(self) -> tuple[dict, dict, dict, dict, dict]:
+    def _run_extended_analysis(self) -> tuple[dict | None, dict | None, dict | None, dict | None, dict | None]:
         structure = rhythm = vocal = chords = dynamics = None
 
         if self.config.analyze_sections:
@@ -1227,7 +1266,7 @@ class KeyDetector:
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(self.final_result.to_dict(), f, indent=2, ensure_ascii=False)
+            json.dump(self.final_result.to_dict(), f, indent=2, ensure_ascii=False, cls=NumpyJSONEncoder)
         logger.info(f"Results saved to {output_path}")
 
 
@@ -1257,7 +1296,8 @@ def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
         lines.append(f"    Припевов: {result.structure.get('chorus_count', 0)}")
         lines.append(f"    Структура: {result.structure.get('structure_map', 'N/A')}")
     elif result.structure and 'error' in result.structure:
-        lines.append(f"\n{colorizer.wrap('📊 СТРУКТУРА:', 'BOLD')} {colorizer.wrap(result.structure['error'], 'YELLOW')}")
+        lines.append(
+            f"\n{colorizer.wrap('📊 СТРУКТУРА:', 'BOLD')} {colorizer.wrap(result.structure['error'], 'YELLOW')}")
 
     if result.rhythm and 'error' not in result.rhythm:
         lines.append(f"\n{colorizer.wrap('🎼 РИТМ:', 'BOLD')}")
@@ -1297,7 +1337,6 @@ def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
     elif result.dynamics and 'error' in result.dynamics:
         lines.append(f"\n{colorizer.wrap('📈 ДИНАМИКА:', 'BOLD')} {colorizer.wrap(result.dynamics['error'], 'YELLOW')}")
 
-    # Рекомендация теперь всегда будет показывать Essentia как доступный
     if result.confidence < 0.6:
         lines.append(
             f"\n{colorizer.wrap('💡 Рекомендация: Essentia уже используется. Для повышения точности проверьте качество аудио.', 'YELLOW')}")
@@ -1345,7 +1384,7 @@ def get_audio_files(paths: list[str], recursive: bool = False) -> list[str]:
 # ==================== CLI ====================
 def main():
     parser = argparse.ArgumentParser(
-        description="Продвинутый анализатор тональности, BPM, структуры, ритма, вокала, аккордов и динамики (только Essentia)",
+        description="Продвинутый анализатор тональности, BPM, структуры, ритма, вокала, аккордов и динамики",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
@@ -1416,7 +1455,7 @@ def main():
                              dynamic_ncols=True, disable=args.json):
             result = process_file(filepath, config, not args.no_save, args.output)
             if args.json:
-                print(json.dumps(result.to_dict(), ensure_ascii=False))
+                print(json.dumps(result.to_dict(), ensure_ascii=False, cls=NumpyJSONEncoder))
             else:
                 tqdm.write(format_result_output(result, colorizer))
     else:
@@ -1431,7 +1470,7 @@ def main():
                 try:
                     result = future.result()
                     if args.json:
-                        print(json.dumps(result.to_dict(), ensure_ascii=False))
+                        print(json.dumps(result.to_dict(), ensure_ascii=False, cls=NumpyJSONEncoder))
                     else:
                         tqdm.write(format_result_output(result, colorizer))
                 except Exception as e:
