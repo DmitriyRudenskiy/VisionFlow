@@ -6,7 +6,7 @@ import argparse
 
 # ==================== БЫСТРАЯ ПРОВЕРКА АРГУМЕНТОВ (ДО ТЯЖЕЛЫХ ИМПОРТОВ) ====================
 def parse_args_early():
-    parser = argparse.ArgumentParser(description="AI-анализатор аудио v6.5.0 (Music Context Aware)")
+    parser = argparse.ArgumentParser(description="AI-анализатор аудио v6.5.1 (Bugfixes & Thematic)")
     parser.add_argument('files', nargs='*', help='Путь к аудиофайлу(ам)')
     parser.add_argument('--output', '-o', help='Папка для сохранения JSON')
     parser.add_argument('--no-save', action='store_true', help='Не сохранять JSON файлы')
@@ -15,6 +15,7 @@ def parse_args_early():
     parser.add_argument('--recursive', '-r', action='store_true', help='Рекурсивный поиск файлов в папках')
     parser.add_argument('--no-whisper', action='store_true', help='Отключить выделение и распознавание вокала')
     parser.add_argument('--whisper-model', default='openai/whisper-large-v3-turbo', help='Модель Whisper')
+    parser.add_argument('--theme', '-t', default='', help='Тема текста (перевод, фанфик, оригинал, протест, эпос)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Подробный лог')
     parser.add_argument('--quiet', '-q', action='store_true', help='Только ошибки')
 
@@ -67,7 +68,7 @@ from demucs.apply import apply_model
 
 DEMUCS_AVAILABLE = True
 
-__version__ = "6.5.0"
+__version__ = "6.5.1"
 
 
 def clear_memory():
@@ -162,6 +163,7 @@ class AnalysisConfig:
     max_autocorr_duration: float = 60.0;
     chroma_reduction: Optional[int] = None
     demucs_chunk_sec: float = 7.0
+    theme_prompt: str = ""  # ИСПРАВЛЕНИЕ v6.5.1: Аргумент темы
 
 
 @dataclass
@@ -206,6 +208,7 @@ class ExtendedResult:
     contour: dict | None = None;
     texture: dict | None = None
     theme_hints: str = "";
+    theme_prompt: str = "";
     all_results: list = field(default_factory=list);
     voting: dict = field(default_factory=dict);
     error: str | None = None
@@ -304,7 +307,6 @@ class KeyMethod:
     @property
     def chroma_avg(self) -> np.ndarray:
         if self._chroma_avg is None:
-            # ИСПРАВЛЕНИЕ v6.5.0: Использование медианы для устойчивости к шумовым выбросам (обертоны морин хуура)
             self._chroma_avg = np.median(self.features.chroma, axis=1) - np.median(
                 np.median(self.features.chroma, axis=1))
             norm = np.linalg.norm(self._chroma_avg)
@@ -499,14 +501,18 @@ class SectionAnalyzer:
         try:
             c, sr, hl, d = self.features.chroma, self.features.sr, 512, self.features.duration
 
-            # ИСПРАВЛЕНИЕ v6.5.0: Добавляем RMS, Centroid, ZCR для KMeans, чтобы различать куплет и припев с одинаковыми аккордами
-            rms_frames = librosa.feature.rms(y=self.features.y)[0]
-            centroid_frames = self.features.spectral_centroid[
-                0] if self.features.spectral_centroid is not None else np.zeros_like(rms_frames)
-            zcr_frames = self.features.zero_crossing_rate[
-                0] if self.features.zero_crossing_rate is not None else np.zeros_like(rms_frames)
+            # ИСПРАВЛЕНИЕ v6.5.1: spectral_centroid и zcr уже 1D массивы, не нужно брать [0]
+            # Также добавлен hop_length=512 для синхронизации с хромой
+            rms_frames = librosa.feature.rms(y=self.features.y, frame_length=2048, hop_length=512)[0]
+            centroid_frames = self.features.spectral_centroid if self.features.spectral_centroid is not None else np.zeros(
+                len(rms_frames))
+            zcr_frames = self.features.zero_crossing_rate if self.features.zero_crossing_rate is not None else np.zeros(
+                len(rms_frames))
 
-            min_len = min(c.shape[1], rms_frames.shape[0], centroid_frames.shape[0], zcr_frames.shape[0])
+            # Жесткая проверка минимальной длины для предотвращения tuple index out of range
+            min_len = min(c.shape[1], len(rms_frames), len(centroid_frames), len(zcr_frames))
+            if min_len < 10: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
+
             c = c[:, :min_len]
             rms_frames = rms_frames[:min_len]
             centroid_frames = centroid_frames[:min_len]
@@ -518,9 +524,9 @@ class SectionAnalyzer:
             zcr_norm = (zcr_frames - np.min(zcr_frames)) / (np.max(zcr_frames) - np.min(zcr_frames) + 1e-10)
 
             sf = int(self.config.segment_duration_sec * sr / hl)
-            if sf >= c.shape[1]: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
+            if sf >= min_len: return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
             segs, times = [], []
-            for i in range(0, c.shape[1] - sf, sf):
+            for i in range(0, min_len - sf, sf):
                 seg_chroma = np.mean(c[:, i:i + sf], axis=1)
                 seg_rms = np.mean(rms_norm[i:i + sf])
                 seg_cent = np.mean(cent_norm[i:i + sf])
@@ -615,10 +621,7 @@ class RhythmAnalyzer:
                 m = f"{b}/4" if b in [2, 4] else "3/4" if b == 3 else "4/4" if sc[b] <= 1.2 else "Free"
             else:
                 m = "4/4" if iv2 < 0.01 else "Free"
-
-            # ИСПРАВЛЕНИЕ v6.5.0: Конвертация 2/4 в 4/4 для рока/поп-музыки
             if m == "2/4" and self.features.tempo < 160: m = "4/4"
-
             return {'tempo_bpm': round(float(self.features.tempo), 1), 'meter': m,
                     'beat_count': len(self.features.beat_frames), 'regularity': round(float(max(0, 1 - iv2 * 10)), 3),
                     'syncopation': round(float(max(0, 1 - (np.mean(
@@ -665,17 +668,21 @@ class DynamicsAnalyzer:
 
     def analyze(self) -> dict:
         try:
-            rms = librosa.feature.rms(y=self.features.y, sr=self.features.sr)[0]
+            # ИСПРАВЛЕНИЕ v6.5.1: Убран аргумент sr=self.features.sr
+            rms = librosa.feature.rms(y=self.features.y, frame_length=2048, hop_length=512)[0]
             rms_db = librosa.amplitude_to_db(rms, ref=np.max)
             dynamic_range = float(np.percentile(rms_db, 95) - np.percentile(rms_db, 5))
-            hop = self.features.sr
-            rms_sec = [np.mean(rms[max(0, i * hop - hop // 2):i * hop + hop // 2]) for i in
+
+            # Расчет кадров в секунду (fps) для правильного расчета громкости по секундам
+            fps = self.features.sr / 512.0
+            rms_sec = [np.mean(rms[max(0, int(i * fps - fps // 2)):int(i * fps + fps // 2)]) for i in
                        range(int(self.features.duration))]
+
             climax_time = int(np.argmax(rms_sec)) if rms_sec else 0
             drops = []
-            rms_sec = np.array(rms_sec)
-            for i in range(1, len(rms_sec)):
-                if rms_sec[i - 1] > 0.01 and rms_sec[i] < rms_sec[i - 1] * 0.5: drops.append(i)
+            rms_sec_arr = np.array(rms_sec)
+            for i in range(1, len(rms_sec_arr)):
+                if rms_sec_arr[i - 1] > 0.01 and rms_sec_arr[i] < rms_sec_arr[i - 1] * 0.5: drops.append(i)
             return {'average_loudness_db': round(float(np.mean(rms_db)), 1),
                     'dynamic_range_db': round(dynamic_range, 1), 'climax_time_sec': climax_time,
                     'drops_count': len(drops), 'drops_times_sec': drops[:5]}
@@ -740,13 +747,39 @@ class TextureAnalyzer:
         try:
             zcr = np.mean(self.features.zero_crossing_rate) if self.features.zero_crossing_rate is not None else 0
             contrast = np.mean(self.features.spectral_contrast) if self.features.spectral_contrast is not None else 0
-            if zcr > 0.08:
-                texture = "dense/distorted"
+
+            # ИСПРАВЛЕНИЕ v6.5.1: RMS Variance для детекта перегруженных гитар (The Hu)
+            rms = librosa.feature.rms(y=self.features.y, frame_length=2048, hop_length=512)[0]
+            rms_variance = np.var(rms)
+
+            # The Hu has heavy distortion but low pitch -> low ZCR sometimes, but high RMS variance
+            if rms_variance > 0.01 or zcr > 0.04:
+                texture = "dense/distorted (Heavy Rock/Folk Metal)"
             elif contrast > 25:
-                texture = "harmonic/clean"
+                texture = "harmonic/clean (Acoustic/Folk)"
             else:
                 texture = "sparse"
-            return {'avg_zcr': round(float(zcr), 4), 'texture_class': texture}
+            return {'avg_zcr': round(float(zcr), 4), 'texture_class': texture,
+                    'rms_variance': round(float(rms_variance), 4)}
+        except Exception as e:
+            return {'error': str(e)}
+
+
+class GenreAnalyzer:
+    def __init__(self, features: AudioFeatures, vocal_result: dict | None = None):
+        self.features = features
+        self.vocal_result = vocal_result or {}
+
+    def analyze(self) -> dict:
+        try:
+            # ИСПРАВЛЕНИЕ v6.5.1: Добавлена эвристика для Hunnu Rock / Folk Metal
+            if self.vocal_result.get('throat_singing_likely'):
+                genre = "Hunnu Rock / Folk Metal"
+            elif self.features.spectral_centroid is not None and np.mean(self.features.spectral_centroid) > 3000:
+                genre = "Metal / Hard Rock"
+            else:
+                genre = "Folk Rock / Alternative"
+            return {'genre_class': genre, 'confidence': 'heuristic'}
         except Exception as e:
             return {'error': str(e)}
 
@@ -772,12 +805,19 @@ class VocalAnalyzer:
             model = AutoModelForSpeechSeq2Seq.from_pretrained(self.whisper_model_name, dtype=td, low_cpu_mem_usage=True,
                                                               cache_dir=cd).to(dev)
             proc = AutoProcessor.from_pretrained(self.whisper_model_name, cache_dir=cd)
-            self._whisper_pipe_cache[self.whisper_model_name] = pipeline("automatic-speech-recognition", model=model,
-                                                                         tokenizer=proc.tokenizer,
-                                                                         feature_extractor=proc.feature_extractor,
-                                                                         chunk_length_s=30, batch_size=1, dtype=td,
-                                                                         device=dev, ignore_warning=True,
-                                                                         clean_up_tokenization_spaces=False)
+
+            # ИСПРАВЛЕНИЕ v6.5.1: Убран clean_up_tokenization_spaces (удален в новых версиях transformers)
+            self._whisper_pipe_cache[self.whisper_model_name] = pipeline(
+                "automatic-speech-recognition",
+                model=model,
+                tokenizer=proc.tokenizer,
+                feature_extractor=proc.feature_extractor,
+                chunk_length_s=30,
+                batch_size=1,
+                dtype=td,
+                device=dev,
+                ignore_warning=True
+            )
             logger.info("✅ Whisper загружен.")
         return self._whisper_pipe_cache[self.whisper_model_name]
 
@@ -863,8 +903,6 @@ class VocalAnalyzer:
         try:
             v16 = librosa.resample(self._vocal_audio, orig_sr=self.features.sr, target_sr=16000)
             logger.info("📝 Транскрибация...")
-
-            # ИСПРАВЛЕНИЕ v6.5.0: Форсирование монгольского языка при галлюцинациях
             res_auto = pipe(v16, return_timestamps=True, generate_kwargs={"task": "transcribe"})
             lang_auto = res_auto.get("language", "unknown")
             txt_auto = " ".join([c["text"].strip() for c in res_auto.get("chunks", []) if c["text"].strip()])
@@ -886,7 +924,6 @@ class VocalAnalyzer:
             del v16;
             clear_memory()
 
-            # СЛОВАРНАЯ СЕТКА С ПРИВЯЗКОЙ К ТАКТАМ
             chunks = res.get("chunks", [])
             beat_times = librosa.frames_to_time(self.features.beat_frames, sr=self.features.sr)
             bar_duration = np.median(np.diff(beat_times)) * 4 if len(beat_times) >= 4 else 4 * (
@@ -955,15 +992,22 @@ class MusicAnalyzer:
 
     def _generate_theme_hints(self, res_dict: dict) -> str:
         hints = []
-        if res_dict.get('timbre', {}).get('timbre_class') == 'dark/deep': hints.append("мрачная, низкая")
-        if res_dict.get('texture', {}).get('texture_class') == 'dense/distorted': hints.append(
-            "агрессивная, эпичная, стена звука")
-        if res_dict.get('dynamics', {}).get('dynamic_range_db', 0) > 15: hints.append(
-            "контрастная, с тихими и взрывными частями")
-        if res_dict.get('rhythm', {}).get('syncopation', 0) > 0.5: hints.append("ритмичная, ломаный грув")
-        if res_dict.get('vocal', {}).get('throat_singing_likely'): hints.extend(
-            ["степь", "горловое пение", "шаманизм", "природа"])
-        if res_dict.get('structure', {}).get('chorus_count', 0) >= 3: hints.append("гимн, хитовая структура")
+        user_theme = res_dict.get('theme_prompt', '')
+        if user_theme:
+            hints.insert(0, f"Запрос: {user_theme}")
+
+        genre = res_dict.get('genre', {}).get('genre_class', '')
+        if 'Hunnu' in genre or 'Folk' in genre:
+            hints.extend(["эпическая", "историческая", "кочевники", "степь", "призыв к битве"])
+        if res_dict.get('timbre', {}).get('timbre_class') == 'dark/deep':
+            hints.append("мрачная, героическая")
+        if res_dict.get('texture', {}).get('texture_class', '').startswith('dense'):
+            hints.append("агрессивная, стена звука, протест")
+        if res_dict.get('vocal', {}).get('throat_singing_likely'):
+            hints.extend(["шаманизм", "дух предков", "горловое пение"])
+        if res_dict.get('dynamics', {}).get('dynamic_range_db', 0) > 15:
+            hints.append("контрастная, нарастающая ярость")
+
         return ", ".join(hints) if hints else "нейтральная, повествовательная"
 
     def _extract_features(self, file_path: str) -> AudioFeatures:
@@ -1008,7 +1052,8 @@ class MusicAnalyzer:
             er = ExtendedResult(file=file_path, key=bk, mode=bm, confidence=round(cf, 3), confidence_level=cl,
                                 votes=votes, total_methods=len(vr),
                                 bpm=BPMDetector.detect(f, self.config), duration_seconds=f.duration, sample_rate=f.sr,
-                                all_results=res, voting={f"{k[0]} {k[1]}": v for k, v in wv.items()})
+                                all_results=res, voting={f"{k[0]} {k[1]}": v for k, v in wv.items()},
+                                theme_prompt=self.config.theme_prompt)
 
             if self.config.analyze_sections: er.structure = SectionAnalyzer(f, self.config).analyze()
             if self.config.analyze_rhythm: er.rhythm = RhythmAnalyzer(f).analyze()
@@ -1018,6 +1063,9 @@ class MusicAnalyzer:
             if self.config.analyze_contour: er.contour = ContourAnalyzer(f).analyze()
             if self.config.analyze_timbre: er.timbre = TimbreAnalyzer(f).analyze()
             if self.config.analyze_texture: er.texture = TextureAnalyzer(f).analyze()
+
+            # Genre Analyzer использует результат вокала (детект горлового пения)
+            if self.config.analyze_genre: er.genre = GenreAnalyzer(f, er.vocal).analyze()
 
             er.theme_hints = self._generate_theme_hints(er.to_dict())
 
@@ -1047,13 +1095,16 @@ def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
         colorizer.wrap(f"\n🎵 Файл: {result.file}", "BOLD", "WHITE"),
         colorizer.wrap(
             f"Тональность: {result.key} {result.mode} ({result.confidence * 100:.1f}% - {result.confidence_level})",
-            "GREEN"),
-        colorizer.wrap(f"💡 Вайб/Тема: {result.theme_hints}", "CYAN")
+            "GREEN")
     ]
+    if result.theme_prompt: lines.append(colorizer.wrap(f"🎯 Ваш запрос: {result.theme_prompt}", "MAGENTA"))
+    lines.append(colorizer.wrap(f"💡 Вайб/Тема: {result.theme_hints}", "CYAN"))
+
     if result.error: lines.append(colorizer.wrap(f"⚠️ Ошибка: {result.error}", "RED"))
     if result.bpm: lines.append(f"⏱ BPM: {result.bpm}")
     if result.rhythm: lines.append(
         f"🥁 Ритм: {result.rhythm.get('meter', '?')} | Syncopation: {result.rhythm.get('syncopation', 0)}")
+    if result.genre: lines.append(f"🎸 Жанр: {result.genre.get('genre_class', '?')}")
     if result.structure and 'structure_map' in result.structure: lines.append(
         f"🏗 Структура: {result.structure['structure_map']}")
     if result.chords and 'chord_progression' in result.chords and result.chords['chord_progression']:
@@ -1091,7 +1142,11 @@ def main(args):
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
         pass
-    config = AnalysisConfig(use_whisper=not args.no_whisper, whisper_model=args.whisper_model)
+    config = AnalysisConfig(
+        use_whisper=not args.no_whisper,
+        whisper_model=args.whisper_model,
+        theme_prompt=args.theme
+    )
     files_to_process = get_audio_files(args.files, recursive=args.recursive)
     if not files_to_process:
         logger.error("Не найдено аудиофайлов.")
