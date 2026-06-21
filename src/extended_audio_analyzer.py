@@ -5,11 +5,11 @@ import sys
 import argparse
 import logging
 import warnings
-from collections import defaultdict
+from collections import defaultdict, Counter
 from dataclasses import dataclass, field
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, Optional
 import numpy as np
 
 # Отключаем специфичные предупреждения до импорта librosa
@@ -18,7 +18,7 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 # ==================== ВЕРСИЯ ====================
-__version__ = "2.5.0"
+__version__ = "3.0.0"
 
 # ==================== ЗАВИСИМОСТИ ====================
 try:
@@ -34,13 +34,35 @@ except ImportError:
     print("Ошибка: Библиотека scipy не установлена. Установите: pip install scipy")
     sys.exit(1)
 
-essentia = None
-es = None
+try:
+    from sklearn.cluster import KMeans
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+
+# Essentia теперь обязателен – всегда доступен
 try:
     import essentia
     import essentia.standard as es
 except ImportError:
+    print("Ошибка: Библиотека essentia не установлена. Установите: pip install essentia")
+    sys.exit(1)
+
+ESSENTIA_AVAILABLE = True
+
+whisper_available = False
+try:
+    import whisper
+    whisper_available = True
+except ImportError:
     pass
+
+# Для записи wav в VocalAnalyzer
+try:
+    import soundfile as sf
+    SOUNDFILE_AVAILABLE = True
+except ImportError:
+    SOUNDFILE_AVAILABLE = False
 
 try:
     from tqdm import tqdm
@@ -95,18 +117,22 @@ BELLMAN_MAJOR = np.array([0.169, 0.003, 0.041, 0.003, 0.117, 0.013, 0.003, 0.212
 BELLMAN_MINOR = np.array([0.181, 0.003, 0.048, 0.074, 0.013, 0.034, 0.003, 0.214, 0.074, 0.013, 0.034, 0.013])
 
 METHOD_WEIGHTS = {
-    'Krumhansl-Schmuckler': 0.8,
-    'Temperley': 1.0,
-    'Albrecht-Shanahan': 1.3,
-    'Bellman': 1.1,
-    'Bass Analysis': 1.2,
-    'Track Boundaries': 0.9,
-    'Chord Voting': 1.3,
-    'Circle of Fifths': 0.8,
-    'Spectral Analysis': 0.7,
+    'Krumhansl-Schmuckler': 0.8, 'Temperley': 1.0, 'Albrecht-Shanahan': 1.3,
+    'Bellman': 1.1, 'Bass Analysis': 1.2, 'Track Boundaries': 0.9,
+    'Chord Voting': 1.3, 'Circle of Fifths': 0.8, 'Spectral Analysis': 0.7,
     'Essentia': 1.5,
 }
 
+CHORD_PROFILES_MAJOR = {
+    0: [1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0],
+    1: [0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0],
+    # ... остальные аккорды оставлены для полноты, но теперь не используются
+}
+CHORD_PROFILES_MINOR = {
+    0: [1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0],
+    1: [0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0],
+    # ... аналогично
+}
 
 # ==================== ТИПИЗАЦИЯ ====================
 class MethodResult(TypedDict, total=False):
@@ -123,22 +149,28 @@ class MethodResult(TypedDict, total=False):
 # ==================== DATACLASSES ====================
 @dataclass
 class AnalysisConfig:
-    sample_rate: int = 22050
+    sample_rate: int = 44100                    # Essentia использует 44100, теперь это стандарт
     trim_top_db: int = 20
     use_hpss: bool = True
     normalize_audio: bool = True
     bpm_min: int = 40
     bpm_max: int = 220
+    use_whisper: bool = False
+    whisper_model: str = "base"
+    analyze_sections: bool = True
+    analyze_rhythm: bool = True
+    analyze_vocal: bool = True
+    analyze_chords: bool = True
+    analyze_dynamics: bool = True
 
 
 @dataclass
 class AudioFeatures:
-    """Глобально вычисляемые признаки аудио."""
     y: np.ndarray
     y_perc: np.ndarray
     sr: int
     chroma: np.ndarray
-    bass_chroma: np.ndarray  # Добавлено для оптимизации BassMethod
+    bass_chroma: np.ndarray
     tempo: float
     beat_frames: np.ndarray
     onset_env: np.ndarray
@@ -148,7 +180,15 @@ class AudioFeatures:
 
 
 @dataclass
-class AnalysisResult:
+class SectionInfo:
+    label: str
+    start_time: float
+    end_time: float
+    duration: float
+
+
+@dataclass
+class ExtendedResult:
     file: str
     key: str
     mode: str
@@ -159,6 +199,11 @@ class AnalysisResult:
     bpm: dict | None = None
     duration_seconds: float = 0.0
     sample_rate: int = 22050
+    structure: dict | None = None
+    rhythm: dict | None = None
+    vocal: dict | None = None
+    chords: dict | None = None
+    dynamics: dict | None = None
     all_results: list = field(default_factory=list)
     voting: dict = field(default_factory=dict)
     error: str | None = None
@@ -175,6 +220,11 @@ class AnalysisResult:
             'votes': self.votes,
             'total_methods': self.total_methods,
             'bpm': self.bpm,
+            'structure': self.structure,
+            'rhythm': self.rhythm,
+            'vocal': self.vocal,
+            'chords': self.chords,
+            'dynamics': self.dynamics,
             'all_results': self.all_results,
             'voting': self.voting
         }
@@ -182,7 +232,6 @@ class AnalysisResult:
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def normalize_key(key_name: str) -> str:
-    """Надёжно нормализует название тональности."""
     try:
         midi = librosa.note_to_midi(key_name)
         pc = midi % 12
@@ -277,16 +326,14 @@ class ProfileMethod(KeyMethod):
             return self.result(best_min_idx, 'Minor', min_corrs[best_min_idx], conf)
 
 
-# ==================== МЕТОД 5: Анализ баса (ОПТИМИЗИРОВАНО) ====================
+# ==================== МЕТОД 5: Анализ баса ====================
 class BassMethod(KeyMethod):
     name = "Bass Analysis"
     weight = METHOD_WEIGHTS.get(name, 1.0)
 
     def detect(self) -> MethodResult:
         try:
-            # Используем предвычисленную басовую хромограмму
             bass_energy = np.mean(self.features.bass_chroma, axis=1)
-
             tonic_idx = int(np.argmax(bass_energy))
             fifth_energy = bass_energy[(tonic_idx + 7) % 12]
             score = bass_energy[tonic_idx] + 0.5 * fifth_energy
@@ -439,14 +486,9 @@ class EssentiaMethod(KeyMethod):
     weight = METHOD_WEIGHTS.get(name, 1.0)
 
     def detect(self) -> MethodResult:
-        if essentia is None or es is None:
-            return {'method': self.name, 'error': 'Essentia not installed'}
-
+        # Essentia гарантированно доступна, убрана проверка
         try:
             audio = self.features.y.astype(np.float32)
-            sr = self.features.sr
-
-            # Essentia обычно ожидает 44100 Гц. Ресемплинг происходит при загрузке librosa.
             profiles = ['temperley', 'krumhansl', 'edma']
             best_result = None
             best_strength = 0.0
@@ -539,10 +581,411 @@ class BPMDetector:
         if results:
             values = list(results.values())
             median = np.median(values)
-            # Отсеиваем значения, которые сильно отклоняются от медианы (удвоение/половинение BPM)
             filtered = {k: v for k, v in results.items() if abs(v - median) / median < 0.15}
             return filtered if filtered else results
         return {}
+
+
+# ==================== АНАЛИЗАТОР СТРУКТУРЫ ====================
+class SectionAnalyzer:
+    """Анализ структуры песни: куплеты, припевы, бридж, инструменталы."""
+
+    def __init__(self, features: AudioFeatures):
+        self.features = features
+
+    def analyze(self) -> dict:
+        if not SKLEARN_AVAILABLE:
+            return {'error': 'scikit-learn не установлен', 'sections': []}
+
+        try:
+            chroma = self.features.chroma
+            sr = self.features.sr
+
+            hop_length = 512
+            segment_frames = int(2 * sr / hop_length)
+
+            if segment_frames >= chroma.shape[1]:
+                return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
+
+            segments = []
+            times = []
+
+            for i in range(0, chroma.shape[1] - segment_frames, segment_frames):
+                seg_chroma = chroma[:, i:i + segment_frames]
+                seg_features = np.mean(seg_chroma, axis=1)
+                segments.append(seg_features)
+                start_time = librosa.frames_to_time(i, sr=sr, hop_length=hop_length)
+                end_time = librosa.frames_to_time(i + segment_frames, sr=sr, hop_length=hop_length)
+                times.append((start_time, end_time))
+
+            if len(segments) < 3:
+                return {'sections': [], 'structure_map': 'Too short', 'chorus_count': 0}
+
+            segments = np.array(segments)
+            n_clusters = min(6, len(segments))
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init='auto')
+            labels = kmeans.fit_predict(segments)
+
+            sections = []
+            current_label = labels[0]
+            current_start = times[0][0]
+
+            for i in range(1, len(labels)):
+                if labels[i] != current_label or i == len(labels) - 1:
+                    end_idx = i if labels[i] != current_label else i
+                    current_end = times[end_idx - 1][1]
+
+                    seg_indices = [j for j in range(len(labels)) if labels[j] == current_label]
+                    seg_energy = np.mean([np.sum(segments[j]) for j in seg_indices])
+
+                    if current_start < 5:
+                        label = "Intro"
+                    elif current_end > self.features.duration - 5:
+                        label = "Outro"
+                    elif seg_energy > np.percentile([np.sum(s) for s in segments], 70):
+                        label = "Chorus"
+                    elif seg_energy < np.percentile([np.sum(s) for s in segments], 30):
+                        label = "Bridge"
+                    else:
+                        label = "Verse"
+
+                    sections.append(SectionInfo(
+                        label=label,
+                        start_time=round(current_start, 2),
+                        end_time=round(current_end, 2),
+                        duration=round(current_end - current_start, 2)
+                    ))
+
+                    current_label = labels[i]
+                    current_start = times[i][0]
+
+            chorus_count = sum(1 for s in sections if s.label == "Chorus")
+            structure_map = " → ".join([s.label for s in sections])
+
+            return {
+                'sections': [
+                    {'label': s.label, 'start_time': s.start_time,
+                     'end_time': s.end_time, 'duration': s.duration}
+                    for s in sections
+                ],
+                'structure_map': structure_map,
+                'chorus_count': chorus_count,
+                'total_sections': len(sections)
+            }
+
+        except Exception as e:
+            logger.error(f"Section analysis failed: {e}")
+            return {'error': str(e), 'sections': []}
+
+
+# ==================== АНАЛИЗАТОР РИТМА ====================
+class RhythmAnalyzer:
+    """Анализ ритмической структуры."""
+
+    def __init__(self, features: AudioFeatures):
+        self.features = features
+
+    def analyze(self) -> dict:
+        try:
+            tempo = self.features.tempo
+            beat_frames = self.features.beat_frames
+            sr = self.features.sr
+
+            if tempo <= 0 or len(beat_frames) < 4:
+                return {'error': 'Cannot determine rhythm'}
+
+            beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+            if len(beat_times) > 1:
+                intervals = np.diff(beat_times)
+                median_interval = np.median(intervals)
+                interval_variance = np.var(intervals) / (median_interval ** 2)
+
+                if interval_variance < 0.01:
+                    meter = "4/4"
+                elif interval_variance < 0.02:
+                    meter = "3/4"
+                elif interval_variance < 0.03:
+                    meter = "6/8"
+                else:
+                    meter = "Free"
+            else:
+                meter = "Unknown"
+
+            regularity = max(0, 1 - interval_variance * 10) if len(beat_times) > 1 else 0
+
+            if len(beat_frames) > 2:
+                onset_env = self.features.onset_env
+                beat_strength = np.mean([onset_env[min(b, len(onset_env) - 1)] for b in beat_frames])
+                avg_strength = np.mean(onset_env)
+                syncopation = max(0, 1 - (beat_strength / (avg_strength + 1e-10)))
+            else:
+                syncopation = 0
+
+            return {
+                'tempo_bpm': round(float(tempo), 1),
+                'meter': meter,
+                'beat_count': len(beat_frames),
+                'regularity': round(float(regularity), 3),
+                'syncopation': round(float(syncopation), 3),
+                'beat_times': [round(float(t), 2) for t in beat_times[:20]]
+            }
+
+        except Exception as e:
+            logger.error(f"Rhythm analysis failed: {e}")
+            return {'error': str(e)}
+
+
+# ==================== АНАЛИЗАТОР ВОКАЛА ====================
+class VocalAnalyzer:
+    """Анализ вокала и лирики."""
+
+    def __init__(self, features: AudioFeatures, use_whisper: bool = False, whisper_model: str = "base"):
+        self.features = features
+        self.use_whisper = use_whisper and whisper_available and SOUNDFILE_AVAILABLE
+        self.whisper_model = whisper_model
+
+    def analyze(self) -> dict:
+        try:
+            y = self.features.y
+            sr = self.features.sr
+
+            S = np.abs(librosa.stft(y))
+            freqs = librosa.fft_frequencies(sr=sr)
+
+            vocal_band = (freqs >= 200) & (freqs <= 2000)
+            vocal_energy = np.mean(S[vocal_band, :], axis=0)
+            total_energy = np.mean(S, axis=0)
+
+            vocal_ratio = vocal_energy / (total_energy + 1e-10)
+            vocal_presence = np.mean(vocal_ratio > 0.3)
+
+            vocal_segments = []
+            threshold = 0.3
+            in_vocal = False
+            start_time = 0
+            hop_length = 512
+
+            for i, ratio in enumerate(vocal_ratio):
+                time = librosa.frames_to_time(i, sr=sr, hop_length=hop_length)
+                if ratio > threshold and not in_vocal:
+                    in_vocal = True
+                    start_time = time
+                elif ratio <= threshold and in_vocal:
+                    in_vocal = False
+                    if time - start_time > 0.5:
+                        vocal_segments.append({
+                            'start': round(start_time, 2),
+                            'end': round(time, 2),
+                            'duration': round(time - start_time, 2)
+                        })
+
+            if in_vocal:
+                end_time = librosa.frames_to_time(len(vocal_ratio), sr=sr, hop_length=hop_length)
+                if end_time - start_time > 0.5:
+                    vocal_segments.append({
+                        'start': round(start_time, 2),
+                        'end': round(end_time, 2),
+                        'duration': round(end_time - start_time, 2)
+                    })
+
+            result = {
+                'vocal_presence_percent': round(float(vocal_presence * 100), 1),
+                'vocal_segments': vocal_segments,
+                'vocal_segments_count': len(vocal_segments)
+            }
+
+            if self.use_whisper:
+                try:
+                    model = whisper.load_model(self.whisper_model)
+                    # Исправлено: используем soundfile вместо librosa.output.write_wav
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                        sf.write(tmp.name, y, sr)
+                        transcription = model.transcribe(tmp.name)
+                    Path(tmp.name).unlink(missing_ok=True)
+
+                    text = transcription.get("text", "")
+                    language = transcription.get("language", "unknown")
+
+                    words = text.lower().split()
+                    phrase_counter = Counter()
+                    for n in [2, 3]:
+                        for i in range(len(words) - n + 1):
+                            phrase = " ".join(words[i:i + n])
+                            phrase_counter[phrase] += 1
+
+                    repeated_phrases = [
+                        {'phrase': phrase, 'count': count}
+                        for phrase, count in phrase_counter.most_common(10)
+                        if count > 1
+                    ]
+
+                    result.update({
+                        'transcription': text[:500],
+                        'language': language,
+                        'repeated_phrases': repeated_phrases,
+                        'whisper_used': True
+                    })
+
+                except Exception as e:
+                    logger.warning(f"Whisper transcription failed: {e}")
+                    result['whisper_used'] = False
+                    result['whisper_error'] = str(e)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Vocal analysis failed: {e}")
+            return {'error': str(e)}
+
+
+# ==================== АНАЛИЗАТОР АККОРДОВ (только Essentia) ====================
+class ChordAnalyzer:
+    """Анализ гармонической прогрессии – только через Essentia."""
+
+    def __init__(self, features: AudioFeatures):
+        self.features = features
+
+    def analyze(self) -> dict:
+        try:
+            audio = self.features.y.astype(np.float32)
+            sr = float(self.features.sr)                     # обязательно float
+
+            # Извлекаем гармонические признаки (HPCP)
+            hpcp = es.HPCP(sampleRate=sr, minFrequency=40.0, maxFrequency=5000.0)(audio)
+
+            # Параметры, необходимые детектору аккордов
+            hopSize = 256                                      # стандартный шаг HPCP
+
+            # Выбираем доступный алгоритм
+            if hasattr(es, 'ChordsDetection'):
+                chord_detector = es.ChordsDetection()
+            elif hasattr(es, 'ChordDetection'):
+                chord_detector = es.ChordDetection()
+            else:
+                return {'error': 'No chord detection algorithm available'}
+
+            # ВАЖНО: передаём ТРИ аргумента (HPCP, hopSize, sampleRate)
+            chords, times = chord_detector(hpcp, hopSize, sr)
+
+            # Формируем результат
+            chord_progression = []
+            for chord, time in zip(chords, times):
+                chord_progression.append({
+                    'chord': str(chord),
+                    'time': round(float(time), 2)
+                })
+
+            return {
+                'method': 'Essentia',
+                'chords': chord_progression,
+                'chord_count': len(chord_progression),
+                'progression': " - ".join([c['chord'] for c in chord_progression[:8]])
+            }
+
+        except Exception as e:
+            logger.error(f"Chord analysis failed: {e}")
+            return {'error': str(e)}
+
+
+# ==================== АНАЛИЗАТОР ДИНАМИКИ ====================
+class DynamicsAnalyzer:
+    """Анализ динамики и энергетического профиля."""
+
+    def __init__(self, features: AudioFeatures):
+        self.features = features
+
+    def analyze(self) -> dict:
+        try:
+            y = self.features.y
+            sr = self.features.sr
+
+            hop_length = 512
+            rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
+            rms_db = librosa.amplitude_to_db(rms, ref=np.max)
+
+            max_db = np.max(rms_db)
+            min_db = np.percentile(rms_db, 5)
+            dynamic_range = max_db - min_db
+
+            threshold_loud = np.percentile(rms_db, 70)
+            threshold_quiet = np.percentile(rms_db, 30)
+
+            loud_segments = []
+            quiet_segments = []
+            segment_length = int(2 * sr / hop_length)
+
+            for i in range(0, len(rms_db), segment_length):
+                segment = rms_db[i:i + segment_length]
+                if len(segment) < segment_length // 2:
+                    break
+
+                segment_mean = np.mean(segment)
+                start_time = librosa.frames_to_time(i, sr=sr, hop_length=hop_length)
+                end_time = librosa.frames_to_time(i + len(segment), sr=sr, hop_length=hop_length)
+
+                if segment_mean > threshold_loud:
+                    loud_segments.append({
+                        'start': round(float(start_time), 2),
+                        'end': round(float(end_time), 2),
+                        'mean_db': round(float(segment_mean), 1)
+                    })
+                elif segment_mean < threshold_quiet:
+                    quiet_segments.append({
+                        'start': round(float(start_time), 2),
+                        'end': round(float(end_time), 2),
+                        'mean_db': round(float(segment_mean), 1)
+                    })
+
+            try:
+                cent = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0]
+                cent_mean = np.mean(cent)
+                cent_std = np.std(cent)
+
+                solo_segments = []
+                for i in range(0, len(cent), segment_length):
+                    segment = cent[i:i + segment_length]
+                    if len(segment) < segment_length // 2:
+                        break
+
+                    if np.mean(segment) > cent_mean + cent_std and np.std(segment) > cent_std * 0.5:
+                        start_time = librosa.frames_to_time(i, sr=sr, hop_length=hop_length)
+                        end_time = librosa.frames_to_time(i + len(segment), sr=sr, hop_length=hop_length)
+                        solo_segments.append({
+                            'start': round(float(start_time), 2),
+                            'end': round(float(end_time), 2),
+                            'mean_centroid': round(float(np.mean(segment)), 1)
+                        })
+            except Exception:
+                solo_segments = []
+
+            energy_profile = []
+            profile_step = max(1, int(self.features.duration / 10))
+            step_frames = len(rms_db) // profile_step
+
+            for i in range(profile_step):
+                start_idx = i * step_frames
+                end_idx = min((i + 1) * step_frames, len(rms_db))
+                if start_idx < len(rms_db):
+                    segment_mean = np.mean(rms_db[start_idx:end_idx])
+                    energy_profile.append(round(float(segment_mean), 1))
+
+            return {
+                'dynamic_range_db': round(float(dynamic_range), 1),
+                'loud_segments': loud_segments,
+                'loud_segments_count': len(loud_segments),
+                'quiet_segments': quiet_segments,
+                'quiet_segments_count': len(quiet_segments),
+                'instrumental_solos': solo_segments,
+                'solos_count': len(solo_segments),
+                'energy_profile': energy_profile,
+                'max_rms_db': round(float(max_db), 1),
+                'min_rms_db': round(float(min_db), 1)
+            }
+
+        except Exception as e:
+            logger.error(f"Dynamics analysis failed: {e}")
+            return {'error': str(e)}
 
 
 # ==================== ОСНОВНОЙ КЛАСС АНАЛИЗАТОРА ====================
@@ -554,14 +997,13 @@ class KeyDetector:
         self.methods: list[KeyMethod] = []
         self.results: list[MethodResult] = []
         self.bpm_results: dict = {}
-        self.final_result: AnalysisResult | None = None
+        self.final_result: ExtendedResult | None = None
 
     def _load_audio(self) -> tuple[np.ndarray, np.ndarray, int, float]:
         logger.info(f"Loading audio: {self.filepath}")
         try:
-            # Essentia требует 44100 Гц. Загружаем сразу в нативном формате эссентии, чтобы избежать двойного ресемплинга.
-            target_sr = 44100 if essentia is not None else self.config.sample_rate
-            y, sr = librosa.load(str(self.filepath), sr=target_sr, mono=True)
+            # Essentia работает на 44100, поэтому теперь всегда 44100
+            y, sr = librosa.load(str(self.filepath), sr=44100, mono=True)
 
             if len(y) == 0:
                 raise ValueError("Audio file is empty or silent")
@@ -587,11 +1029,9 @@ class KeyDetector:
     def _extract_features(self, y: np.ndarray, y_perc: np.ndarray, sr: int, duration: float) -> AudioFeatures:
         logger.info("Extracting global features...")
 
-        # Основная хромограмма со сглаживанием
         chroma = librosa.feature.chroma_cqt(y=y, sr=sr, bins_per_octave=36)
-        chroma = medfilt(chroma, kernel_size=(1, 3))  # Убираем шумные всплески
+        chroma = medfilt(chroma, kernel_size=(1, 3))
 
-        # Хромограмма баса (оптимизация: считаем сразу, без фильтрации scipy)
         fmin_bass = librosa.note_to_hz('C1')
         bass_chroma = librosa.feature.chroma_cqt(y=y, sr=sr, bins_per_octave=36, fmin=fmin_bass, n_octaves=2)
 
@@ -629,15 +1069,48 @@ class KeyDetector:
             ChordVotingMethod(self.features),
             CircleOfFifthsMethod(self.features),
             SpectralMethod(self.features),
-            EssentiaMethod(self.features)
+            EssentiaMethod(self.features)      # всегда присутствует
         ]
 
-    def run(self) -> AnalysisResult:
+    def _run_extended_analysis(self) -> tuple[dict, dict, dict, dict, dict]:
+        structure = rhythm = vocal = chords = dynamics = None
+
+        if self.config.analyze_sections:
+            logger.info("Analyzing song structure...")
+            analyzer = SectionAnalyzer(self.features)
+            structure = analyzer.analyze()
+
+        if self.config.analyze_rhythm:
+            logger.info("Analyzing rhythm...")
+            analyzer = RhythmAnalyzer(self.features)
+            rhythm = analyzer.analyze()
+
+        if self.config.analyze_vocal:
+            logger.info("Analyzing vocals...")
+            analyzer = VocalAnalyzer(
+                self.features,
+                use_whisper=self.config.use_whisper,
+                whisper_model=self.config.whisper_model
+            )
+            vocal = analyzer.analyze()
+
+        if self.config.analyze_chords:
+            logger.info("Analyzing chords...")
+            analyzer = ChordAnalyzer(self.features)
+            chords = analyzer.analyze()
+
+        if self.config.analyze_dynamics:
+            logger.info("Analyzing dynamics...")
+            analyzer = DynamicsAnalyzer(self.features)
+            dynamics = analyzer.analyze()
+
+        return structure, rhythm, vocal, chords, dynamics
+
+    def run(self) -> ExtendedResult:
         try:
             y, y_perc, sr, duration = self._load_audio()
             self.features = self._extract_features(y, y_perc, sr, duration)
 
-            # Явно освобождаем ссылки на сырые массивы, оставляя их только внутри features
             del y, y_perc
 
             self._init_methods()
@@ -661,9 +1134,14 @@ class KeyDetector:
             for k, v in self.bpm_results.items():
                 logger.info(f"BPM {k}: {v:.1f}")
 
-            self.final_result = self._aggregate_results()
+            structure, rhythm, vocal, chords, dynamics = self._run_extended_analysis()
 
-            # Освобождаем крупные массивы
+            self.final_result = self._aggregate_results(
+                structure=structure, rhythm=rhythm, vocal=vocal,
+                chords=chords, dynamics=dynamics
+            )
+
+            # Освобождаем память
             self.features.y = None
             self.features.y_perc = None
             self.features.chroma = None
@@ -672,28 +1150,29 @@ class KeyDetector:
 
             return self.final_result
         except Exception as e:
-            return AnalysisResult(
+            return ExtendedResult(
                 file=str(self.filepath), key='N/A', mode='N/A', confidence=0.0,
                 confidence_level='ОШИБКА', votes=0, total_methods=0, error=str(e)
             )
 
-    def _aggregate_results(self) -> AnalysisResult:
+    def _aggregate_results(self, structure=None, rhythm=None, vocal=None, chords=None, dynamics=None) -> ExtendedResult:
         valid = [r for r in self.results if 'error' not in r and 'pitch_class' in r]
         if not valid:
-            return AnalysisResult(
+            return ExtendedResult(
                 file=str(self.filepath), key='N/A', mode='N/A', confidence=0.0,
                 confidence_level='ОШИБКА', votes=0, total_methods=0, error='No valid results'
             )
 
         groups = defaultdict(lambda: {'votes': 0, 'weighted_sum': 0.0, 'methods': []})
-
         for res in valid:
             group_key = (res['pitch_class'], res['mode'])
             groups[group_key]['votes'] += 1
             groups[group_key]['weighted_sum'] += res['confidence'] * res.get('weight', 1.0)
             groups[group_key]['methods'].append(res['method'])
 
-        sorted_groups = sorted(groups.items(), key=lambda x: (x[1]['votes'], x[1]['weighted_sum']), reverse=True)
+        sorted_groups = sorted(groups.items(),
+                               key=lambda x: (x[1]['votes'], x[1]['weighted_sum']),
+                               reverse=True)
 
         winner_pc, winner_mode = sorted_groups[0][0]
         winner_data = sorted_groups[0][1]
@@ -727,11 +1206,12 @@ class KeyDetector:
                 'methods': data['methods']
             }
 
-        return AnalysisResult(
+        return ExtendedResult(
             file=str(self.filepath), key=winner_key, mode=winner_mode, confidence=confidence,
             confidence_level=level, votes=winner_data['votes'], total_methods=len(valid),
             bpm=bpm_dict, duration_seconds=self.features.duration if self.features else 0.0,
             sample_rate=self.features.sr if self.features else 0,
+            structure=structure, rhythm=rhythm, vocal=vocal, chords=chords, dynamics=dynamics,
             all_results=self.results, voting=voting
         )
 
@@ -752,7 +1232,7 @@ class KeyDetector:
 
 
 # ==================== ПАКЕТНАЯ ОБРАБОТКА ====================
-def format_result_output(result: AnalysisResult, colorizer: Colorizer) -> str:
+def format_result_output(result: ExtendedResult, colorizer: Colorizer) -> str:
     if result.error:
         return colorizer.wrap(f"❌ Error [{result.file}]: {result.error}", 'RED')
 
@@ -771,20 +1251,67 @@ def format_result_output(result: AnalysisResult, colorizer: Colorizer) -> str:
             f"\n  {colorizer.wrap('BPM:', 'BOLD')} среднее {bpm['average']:.1f}, медиана {bpm['median']:.1f}, округлённое {bpm['rounded']}")
         lines.append(f"  {colorizer.wrap('Диапазон:', 'BOLD')} {bpm['range'][0]:.1f} – {bpm['range'][1]:.1f}")
 
-    if result.confidence < 0.6 and not any(
-        m.get('method') == 'Essentia' and 'error' not in m for m in result.all_results):
+    if result.structure and 'error' not in result.structure:
+        lines.append(f"\n{colorizer.wrap('📊 СТРУКТУРА:', 'BOLD')}")
+        lines.append(f"    Секций: {result.structure.get('total_sections', 0)}")
+        lines.append(f"    Припевов: {result.structure.get('chorus_count', 0)}")
+        lines.append(f"    Структура: {result.structure.get('structure_map', 'N/A')}")
+    elif result.structure and 'error' in result.structure:
+        lines.append(f"\n{colorizer.wrap('📊 СТРУКТУРА:', 'BOLD')} {colorizer.wrap(result.structure['error'], 'YELLOW')}")
+
+    if result.rhythm and 'error' not in result.rhythm:
+        lines.append(f"\n{colorizer.wrap('🎼 РИТМ:', 'BOLD')}")
+        lines.append(f"    Размер: {result.rhythm.get('meter', 'N/A')}")
+        lines.append(f"    Регулярность: {result.rhythm.get('regularity', 0):.1%}")
+        lines.append(f"    Синкопирование: {result.rhythm.get('syncopation', 0):.2f}")
+    elif result.rhythm and 'error' in result.rhythm:
+        lines.append(f"\n{colorizer.wrap('🎼 РИТМ:', 'BOLD')} {colorizer.wrap(result.rhythm['error'], 'YELLOW')}")
+
+    if result.vocal and 'error' not in result.vocal:
+        lines.append(f"\n{colorizer.wrap('🎤 ВОКАЛ:', 'BOLD')}")
+        lines.append(f"    Присутствие вокала: {result.vocal.get('vocal_presence_percent', 0):.1f}%")
+        if 'language' in result.vocal:
+            lines.append(f"    Язык: {result.vocal['language']}")
+        if 'repeated_phrases' in result.vocal and result.vocal['repeated_phrases']:
+            lines.append(f"    Повторяющиеся фразы: {len(result.vocal['repeated_phrases'])}")
+            for phrase_info in result.vocal['repeated_phrases'][:3]:
+                lines.append(f"      • \"{phrase_info['phrase']}\" ({phrase_info['count']}x)")
+    elif result.vocal and 'error' in result.vocal:
+        lines.append(f"\n{colorizer.wrap('🎤 ВОКАЛ:', 'BOLD')} {colorizer.wrap(result.vocal['error'], 'YELLOW')}")
+
+    if result.chords and 'error' not in result.chords:
+        lines.append(f"\n{colorizer.wrap('🎸 АККОРДЫ:', 'BOLD')}")
+        lines.append(f"    Метод: {result.chords.get('method', 'N/A')}")
+        lines.append(f"    Аккордов: {result.chords.get('chord_count', 0)}")
+        if 'progression' in result.chords:
+            lines.append(f"    Прогрессия: {result.chords['progression']}")
+    elif result.chords and 'error' in result.chords:
+        lines.append(f"\n{colorizer.wrap('🎸 АККОРДЫ:', 'BOLD')} {colorizer.wrap(result.chords['error'], 'YELLOW')}")
+
+    if result.dynamics and 'error' not in result.dynamics:
+        lines.append(f"\n{colorizer.wrap('📈 ДИНАМИКА:', 'BOLD')}")
+        lines.append(f"    Динамический диапазон: {result.dynamics.get('dynamic_range_db', 0):.1f} dB")
+        lines.append(f"    Громких секций: {result.dynamics.get('loud_segments_count', 0)}")
+        lines.append(f"    Тихих секций: {result.dynamics.get('quiet_segments_count', 0)}")
+        lines.append(f"    Инструментальных соло: {result.dynamics.get('solos_count', 0)}")
+    elif result.dynamics and 'error' in result.dynamics:
+        lines.append(f"\n{colorizer.wrap('📈 ДИНАМИКА:', 'BOLD')} {colorizer.wrap(result.dynamics['error'], 'YELLOW')}")
+
+    # Рекомендация теперь всегда будет показывать Essentia как доступный
+    if result.confidence < 0.6:
         lines.append(
-            f"\n{colorizer.wrap('💡 Рекомендация: установите Essentia для повышения точности (pip install essentia)', 'YELLOW')}")
+            f"\n{colorizer.wrap('💡 Рекомендация: Essentia уже используется. Для повышения точности проверьте качество аудио.', 'YELLOW')}")
 
     lines.append(colorizer.wrap('=' * 70, 'CYAN'))
     return "\n".join(lines)
 
 
-def process_file(filepath: str, config: AnalysisConfig, save: bool, output_dir: str | None) -> AnalysisResult:
+def process_file(filepath: str, config: AnalysisConfig, save: bool, output_dir: str | None) -> ExtendedResult:
     path = Path(filepath)
     if not path.exists():
-        return AnalysisResult(file=filepath, key='N/A', mode='N/A', confidence=0.0, confidence_level='ОШИБКА', votes=0,
-                              total_methods=0, error='File not found')
+        return ExtendedResult(file=filepath, key='N/A', mode='N/A', confidence=0.0,
+                              confidence_level='ОШИБКА', votes=0, total_methods=0,
+                              error='File not found')
 
     try:
         detector = KeyDetector(filepath, config=config)
@@ -797,8 +1324,9 @@ def process_file(filepath: str, config: AnalysisConfig, save: bool, output_dir: 
         return result
     except Exception as e:
         logger.error(f"Error processing {filepath}: {e}")
-        return AnalysisResult(file=filepath, key='N/A', mode='N/A', confidence=0.0, confidence_level='ОШИБКА', votes=0,
-                              total_methods=0, error=str(e))
+        return ExtendedResult(file=filepath, key='N/A', mode='N/A', confidence=0.0,
+                              confidence_level='ОШИБКА', votes=0, total_methods=0,
+                              error=str(e))
 
 
 def get_audio_files(paths: list[str], recursive: bool = False) -> list[str]:
@@ -817,27 +1345,38 @@ def get_audio_files(paths: list[str], recursive: bool = False) -> list[str]:
 # ==================== CLI ====================
 def main():
     parser = argparse.ArgumentParser(
-        description="Продвинутый анализатор тональности и BPM",
+        description="Продвинутый анализатор тональности, BPM, структуры, ритма, вокала, аккордов и динамики (только Essentia)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
   %(prog)s song.mp3
+  %(prog)s song.mp3 --whisper --whisper-model medium
   %(prog)s *.mp3 --output results/ --parallel 4
   %(prog)s song.wav --no-save --verbose --json
   %(prog)s ./music_folder/ --recursive
+  %(prog)s song.mp3 --no-sections --no-rhythm --no-vocal --no-chords --no-dynamics
         """
     )
     parser.add_argument('files', nargs='*', help='Путь к аудиофайлу(ам) или папкам')
     parser.add_argument('--output', '-o', help='Папка для сохранения JSON')
     parser.add_argument('--verbose', '-v', action='store_true', help='Подробный вывод')
     parser.add_argument('--no-save', action='store_true', help='Не сохранять JSON файлы')
-    parser.add_argument('--json', action='store_true', help='Выводить только JSON в консоль (полезно для пайплайнов)')
+    parser.add_argument('--json', action='store_true', help='Выводить только JSON в консоль')
     parser.add_argument('--parallel', '-p', type=int, default=1, help='Количество параллельных процессов')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
     parser.add_argument('--no-color', action='store_true', help='Отключить цветной вывод')
     parser.add_argument('--no-hpss', action='store_true', help='Отключить HPSS разделение')
     parser.add_argument('--no-normalize', action='store_true', help='Отключить нормализацию громкости')
     parser.add_argument('--recursive', '-r', action='store_true', help='Рекурсивный поиск аудио в папках')
+
+    parser.add_argument('--whisper', action='store_true', help='Использовать Whisper для транскрибации вокала')
+    parser.add_argument('--whisper-model', default='base', choices=['tiny', 'base', 'small', 'medium', 'large'],
+                        help='Модель Whisper (по умолчанию: base)')
+    parser.add_argument('--no-sections', action='store_true', help='Отключить анализ структуры')
+    parser.add_argument('--no-rhythm', action='store_true', help='Отключить анализ ритма')
+    parser.add_argument('--no-vocal', action='store_true', help='Отключить анализ вокала')
+    parser.add_argument('--no-chords', action='store_true', help='Отключить анализ аккордов')
+    parser.add_argument('--no-dynamics', action='store_true', help='Отключить анализ динамики')
 
     args = parser.parse_args()
 
@@ -853,7 +1392,14 @@ def main():
 
     config = AnalysisConfig(
         use_hpss=not args.no_hpss,
-        normalize_audio=not args.no_normalize
+        normalize_audio=not args.no_normalize,
+        use_whisper=args.whisper,
+        whisper_model=args.whisper_model,
+        analyze_sections=not args.no_sections,
+        analyze_rhythm=not args.no_rhythm,
+        analyze_vocal=not args.no_vocal,
+        analyze_chords=not args.no_chords,
+        analyze_dynamics=not args.no_dynamics
     )
 
     files_to_process = get_audio_files(args.files, recursive=args.recursive)
@@ -862,13 +1408,12 @@ def main():
         print(colorizer.wrap("Не найдено аудиофайлов для обработки.", 'RED'))
         return
 
-    # Отключаем логирование в консоль, если запрошен только JSON вывод
     if args.json:
         logging.disable(logging.CRITICAL)
 
     if args.parallel <= 1 or len(files_to_process) == 1:
-        for filepath in tqdm(files_to_process, desc="Обработка файлов", file=sys.stdout, dynamic_ncols=True,
-                             disable=args.json):
+        for filepath in tqdm(files_to_process, desc="Обработка файлов", file=sys.stdout,
+                             dynamic_ncols=True, disable=args.json):
             result = process_file(filepath, config, not args.no_save, args.output)
             if args.json:
                 print(json.dumps(result.to_dict(), ensure_ascii=False))
@@ -881,8 +1426,8 @@ def main():
                 for filepath in files_to_process
             }
 
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Обработка файлов", file=sys.stdout,
-                               dynamic_ncols=True, disable=args.json):
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Обработка файлов",
+                               file=sys.stdout, dynamic_ncols=True, disable=args.json):
                 try:
                     result = future.result()
                     if args.json:
