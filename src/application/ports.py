@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 from uuid import UUID
 
 from src.domain.pipeline.entities import PipelineAggregate
@@ -84,7 +84,9 @@ class ImageSegmentationPort(ABC):
     """Порт для AI-сегментации и кропа (SAM3)"""
 
     @abstractmethod
-    def crop_image(self, image_path: Path, mode: str = "square") -> Path: ...
+    def crop_image(self, image_path: Path, mode: str = "square") -> List[Path]:
+        """Вырезает объекты и возвращает список путей к временным файлам."""
+        ...
 
 
 class ImageEmbeddingExtractorPort(ABC):

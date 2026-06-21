@@ -1,4 +1,3 @@
-# tests/test_pipeline_steps.py
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -157,56 +156,79 @@ class TestVisualDeduplicationStep:
 
 
 class TestSmartCropStep:
-    def test_smart_crop_keeps_files_in_root(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
+    def test_smart_crop_saves_single_object(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
+        out = tmp_path / "output"
+        out.mkdir()
         create_test_file(src, "pic.jpg")
-        create_test_file(src, "img.png")
 
         segmenter = MagicMock()
-        segmenter.crop_image.return_value = src / "pic.jpg"
-
-        step = SmartCropStep(file_storage, segmenter=segmenter)
-        config = make_step_config(4, src)
-        result = step.execute(config)
-
-        assert result.status == "COMPLETED"
-        assert result.processed_count == 2
-        assert (src / "pic.jpg").exists()
-        assert (src / "img.png").exists()
-
-    def test_smart_crop_handles_temp_file(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
-        src = tmp_path / "source"
-        src.mkdir()
-        create_test_file(src, "pic2.jpg")
-
-        temp_crop = tmp_path / "temp_crop.jpg"
+        temp_crop = tmp_path / "crop.jpg"
         temp_crop.write_bytes(b"cropped")
-
-        segmenter = MagicMock()
-        segmenter.crop_image.return_value = temp_crop
+        segmenter.crop_image.return_value = [temp_crop]
 
         step = SmartCropStep(file_storage, segmenter=segmenter)
-        config = make_step_config(4, src)
+        config = StepConfigDTO(
+            sequence_number=4,
+            params={"source_path": str(src), "output_path": str(out), "crop_mode": "square"},
+        )
         result = step.execute(config)
 
         assert result.status == "COMPLETED"
         assert result.processed_count == 1
+        # Оригинал не тронут
+        assert (src / "pic.jpg").exists()
+        # Результат в output
+        assert (out / "pic_person_1.jpg").exists()
+        assert (out / "pic_person_1.jpg").read_bytes() == b"cropped"
+        # Временный файл подчищен
         assert not temp_crop.exists()
-        # Оригинал должен быть заменён кропнутой версией
-        assert (src / "pic2.jpg").exists()
-        assert (src / "pic2.jpg").read_bytes() == b"cropped"
+
+    def test_smart_crop_saves_multiple_objects(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
+        src = tmp_path / "source"
+        src.mkdir()
+        out = tmp_path / "output"
+        out.mkdir()
+        create_test_file(src, "group.png")
+
+        segmenter = MagicMock()
+        crop1 = tmp_path / "c1.png"
+        crop1.write_bytes(b"crop1")
+        crop2 = tmp_path / "c2.png"
+        crop2.write_bytes(b"crop2")
+        segmenter.crop_image.return_value = [crop1, crop2]
+
+        step = SmartCropStep(file_storage, segmenter=segmenter)
+        config = StepConfigDTO(
+            sequence_number=4,
+            params={"source_path": str(src), "output_path": str(out), "crop_mode": "square"},
+        )
+        result = step.execute(config)
+
+        assert result.status == "COMPLETED"
+        assert result.processed_count == 2
+        assert (src / "group.png").exists()
+        assert (out / "group_person_1.png").exists()
+        assert (out / "group_person_2.png").exists()
+        assert not crop1.exists()
+        assert not crop2.exists()
 
     def test_smart_crop_reports_errors(self, tmp_path: Path, file_storage: FileSystemStorage) -> None:
         src = tmp_path / "source"
         src.mkdir()
+        out = tmp_path / "output"
+        out.mkdir()
         create_test_file(src, "fail.jpg")
 
         segmenter = MagicMock()
         segmenter.crop_image.side_effect = RuntimeError("Segmentation failed")
 
         step = SmartCropStep(file_storage, segmenter=segmenter)
-        config = make_step_config(4, src)
+        config = StepConfigDTO(
+            sequence_number=4,
+            params={"source_path": str(src), "output_path": str(out), "crop_mode": "square"},
+        )
         result = step.execute(config)
 
         assert result.status == "COMPLETED"

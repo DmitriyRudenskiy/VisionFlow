@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from abc import abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.application.pipeline.steps.base_step import BaseStep
 from src.application.pipeline.dto import StepConfigDTO, StepResultDTO
@@ -14,82 +14,81 @@ logger = logging.getLogger(__name__)
 
 
 class BatchFileProcessingStep(BaseStep):
-    """Базовый класс для шагов, обрабатывающих файлы независимо и сохраняющих результат в JSON."""
+    """
+    Базовый класс для шагов, обрабатывающих файлы независимо.
+    Автоматически создает выходную директорию, пропускает существующие файлы
+    и собирает ошибки.
+    """
 
-    def __init__(self, storage: StoragePort):
+    def __init__(self, storage: StoragePort) -> None:
         self._storage = storage
 
     @property
     @abstractmethod
     def output_subdirectory(self) -> str:
-        """Имя поддиректории для результатов (например, '_vectors')."""
+        """Например: '_vectors'"""
 
     @property
     @abstractmethod
     def output_suffix(self) -> str:
-        """Суффикс выходного файла (например, '_vector.json')."""
+        """Например: '_vector.json'"""
 
     @abstractmethod
-    def process_file(self, file_path: Path) -> Dict[str, Any]:
-        """Обработать файл и вернуть данные для сериализации."""
+    def process_file(self, file_path: Path) -> Optional[Dict[str, Any]]:
+        """
+        Обработать один файл.
+        Возвращает словарь для сохранения в JSON или None, если результат сохранить нельзя.
+        """
 
     def execute(self, config: StepConfigDTO) -> StepResultDTO:
         source_path = Path(config.params.get("source_path", "."))
         if not source_path.is_dir():
-            return StepResultDTO.failed(
-                sequence_number=config.sequence_number,
-                message=f"Source path is not a directory: {source_path}",
-            )
+            return StepResultDTO.failed(config.sequence_number, f"Not a directory: {source_path}")
 
         output_dir = source_path / self.output_subdirectory
+        if output_dir.exists() and output_dir.is_file():
+            return StepResultDTO.failed(
+                config.sequence_number,
+                f"Cannot create output directory: {output_dir} is a file"
+            )
         self._storage.create_directory(output_dir)
 
-        all_files = self._storage.scan_directory(source_path, recursive=False)
+        files = self._storage.scan_directory(source_path, recursive=False)
 
-        processed_count = 0
-        skipped_count = 0
-        error_count = 0
+        processed, skipped, errors = 0, 0, 0
         error_details: List[str] = []
 
-        for file_path in all_files:
-            if not file_path.is_file():
-                continue
+        force_overwrite = config.params.get("force_overwrite", False)
 
-            out_json = output_dir / f"{file_path.stem}{self.output_suffix}"
+        for file_path in files:
+            out_path = output_dir / f"{file_path.stem}{self.output_suffix}"
 
-            if self._storage.path_exists(out_json):
-                skipped_count += 1
+            if self._storage.path_exists(out_path) and not force_overwrite:
+                skipped += 1
                 continue
 
             try:
                 data = self.process_file(file_path)
-                if data is None:
-                    raise ValueError("Processing returned no data")
+                if data:
+                    self._storage.persist_json(out_path, data)
+                    processed += 1
+                else:
+                    logger.warning(f"No data returned for {file_path.name}")
 
-                self._storage.persist_json(out_json, data)
-                processed_count += 1
             except Exception as e:
-                error_msg = f"{file_path.name}: {type(e).__name__}: {e}"
-                logger.warning(f"Failed to process {file_path.name} in {self.__class__.__name__}: {e}")
-                error_details.append(error_msg)
-                error_count += 1
+                errors += 1
+                msg = f"{file_path.name}: {e}"
+                logger.warning(f"Processing error: {msg}")
+                error_details.append(msg)
+                # Обрываем выполнение, если накопилось много ошибок (опционально)
+                if errors > 10:
+                    logger.error("Too many errors, aborting step.")
+                    error_details.append("Aborted due to multiple errors.")
+                    break
 
-        total = processed_count + skipped_count + error_count
-
-        msg_parts = [f"Processed {processed_count}/{total} files"]
-        if skipped_count:
-            msg_parts.append(f"skipped {skipped_count} (exist)")
-        if error_count:
-            msg_parts.append(f"failed {error_count}")
-            details = "; ".join(error_details[:3])
-            if len(error_details) > 3:
-                details += f" (+{len(error_details) - 3} more)"
-            msg_parts.append(f"[{details}]")
-
+        msg = f"Processed: {processed}, Skipped: {skipped}, Errors: {errors}."
         return StepResultDTO.completed(
-            sequence_number=config.sequence_number,
-            message=". ".join(msg_parts) + ".",
-            processed_count=processed_count,
-            skipped_count=skipped_count,
-            errors=error_details if error_details else None,
+            config.sequence_number, message=msg,
+            processed_count=processed, skipped_count=skipped,
+            errors=error_details or None
         )

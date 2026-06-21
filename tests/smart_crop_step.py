@@ -1,3 +1,4 @@
+# src/application/pipeline/steps/smart_crop_step.py
 from __future__ import annotations
 
 import logging
@@ -15,14 +16,14 @@ class SmartCropStep(BaseStep):
     """
     Шаг извлечения объектов.
     Находит все объекты на изображении и сохраняет их как отдельные файлы
-    с постфиксом _person_N в выходную директорию. Оригинальные файлы не изменяются.
+    с постфиксом _person_N. Оригинальные файлы не изменяются.
     """
 
     def __init__(
-        self,
-        storage: StoragePort,
-        segmenter: Optional[ImageSegmentationPort] = None,
-        model_path: Optional[str] = None,
+            self,
+            storage: StoragePort,
+            segmenter: Optional[ImageSegmentationPort] = None,
+            model_path: Optional[str] = None
     ) -> None:
         self._storage = storage
         self._segmenter_factory = segmenter
@@ -54,7 +55,7 @@ class SmartCropStep(BaseStep):
             raise RuntimeError("prepare() was not called before execute()")
 
         source_path = Path(config.params.get("source_path", "."))
-        output_path = Path(config.params.get("output_path", "."))
+        output_path = Path(config.params.get("output_path", "."))  # Output path from config
 
         if not source_path.is_dir():
             return StepResultDTO.failed(
@@ -88,8 +89,12 @@ class SmartCropStep(BaseStep):
                     continue
 
                 # Сохраняем каждый кроп с уникальным именем
-                for idx, crop_tmp_path in enumerate(cropped_paths, start=1):
-                    suffix_str = f"_person_{idx}"
+                for idx, crop_tmp_path in enumerate(cropped_paths):
+                    # Формируем имя: item_00001_person_0.jpg
+                    # Если объект один, можно без индекса, но для единообразия оставим индекс или проверку
+                    suffix_str = f"_person_{idx}" if len(cropped_paths) > 1 else "_person"
+
+                    # Определяем расширение по результату (jpg или png)
                     new_name = f"{file_path.stem}{suffix_str}{crop_tmp_path.suffix}"
                     dest_path = output_path / new_name
 

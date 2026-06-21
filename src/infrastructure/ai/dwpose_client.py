@@ -1,71 +1,75 @@
-# src/infrastructure/ai/dwpose_client.py
-from __future__ import annotations
-
-import logging
+import argparse
+import json
 from pathlib import Path
-from typing import Any
 
+import torch
 from PIL import Image
-
-from src.application.ports import PoseExtractionPort
-
-logger = logging.getLogger(__name__)
-
-_dwpose_import_error: Exception | None = None
-
-try:
-    from dwpose import DwposeDetector  # type: ignore[import-untyped]
-    _DWPOSE_AVAILABLE = True
-except Exception as _exc:
-    _dwpose_import_error = _exc
-    DwposeDetector = None  # type: ignore[misc,assignment]
-    _DWPOSE_AVAILABLE = False
+from transformers import AutoConfig, AutoModel, AutoImageProcessor
 
 
-class DWPoseClient(PoseExtractionPort):
-    """Адаптер для DWPose: детекция скелета, лица и рук."""
+def process_image(image_path: str):
+    # Определяем устройство (GPU, если доступно, иначе CPU)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Используется устройство: {device}")
 
-    def __init__(self, target_size: int = 1024) -> None:
-        if not _DWPOSE_AVAILABLE or DwposeDetector is None:
-            raise RuntimeError(
-                "dwpose is not installed. Install it to use DWPoseClient."
-            ) from _dwpose_import_error
+    # Формируем пути к файлам
+    input_path = Path(image_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Файл не найден: {input_path}")
 
-        self._target_size = target_size
-        logger.info("Loading DWPose model...")
-        self._model = DwposeDetector.from_pretrained_default()
-        logger.info("DWPose model loaded.")
+    # Создаем имя выходного файла с постфиксом: original_name_result.json
+    output_path = input_path.with_name(f"{input_path.stem}_result.json")
 
-    @staticmethod
-    def _pad_to_square(img: Image.Image, target_size: int) -> Image.Image:
-        """Вписывает изображение в квадрат с сохранением пропорций на чёрном фоне."""
-        img = img.convert("RGB")
-        old_w, old_h = img.size
-        ratio = min(target_size / old_w, target_size / old_h)
-        new_w = int(old_w * ratio)
-        new_h = int(old_h * ratio)
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    print("Загрузка модели (это может занять некоторое время)...")
+    config = AutoConfig.from_pretrained("akore/rtmw-x-384x288", trust_remote_code=True)
+    model = AutoModel.from_pretrained("akore/rtmw-x-384x288", trust_remote_code=True)
+    model.to(device)
+    model.eval()
 
-        new_img = Image.new("RGB", (target_size, target_size), (0, 0, 0))
-        pad_x = (target_size - new_w) // 2
-        pad_y = (target_size - new_h) // 2
-        new_img.paste(img, (pad_x, pad_y))
-        return new_img
+    processor = AutoImageProcessor.from_pretrained("akore/rtmw-x-384x288")
 
-    def extract_keypoints(self, image_path: Path) -> dict[str, Any]:
-        img = Image.open(image_path)
-        img_squared = self._pad_to_square(img, self._target_size)
+    print(f"Обработка изображения: {input_path.name}")
+    image = Image.open(input_path).convert("RGB")
+    inputs = processor(images=image, return_tensors="pt")
 
-        # Возвращает кортеж: (rendered_image, keypoints_dict, source_image)
-        _, keypoints, _ = self._model(
-            img_squared,
-            include_hand=True,
-            include_face=True,
-            include_body=True,
-            image_and_json=True,
-            detect_resolution=self._target_size,
-        )
-        # keypoints ожидается в виде dict с ключами body/face/left_hand/right_hand
-        if not isinstance(keypoints, dict):
-            raise RuntimeError(f"Unexpected DWPose output type: {type(keypoints)}")
-        return keypoints
+    # Перемещаем входные данные на то же устройство, что и модель
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    with torch.no_grad():
+        # coordinate_mode="model" -> координаты в пиксельном пространстве модели
+        outputs = model(**inputs, coordinate_mode="model")
+
+    # Извлекаем данные и конвертируем тензоры в обычные списки для JSON
+    # Убираем batch-размерность (1), так как мы обрабатывали одно фото
+    keypoints = outputs.keypoints[0].cpu().tolist()  # (133, 2)
+    scores = outputs.scores[0].cpu().tolist()  # (133,)
+
+    result_data = {
+        "image": input_path.name,
+        "keypoints": keypoints,
+        "scores": scores
+    }
+
+    print(f"Сохранение результата в: {output_path}")
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(result_data, f, indent=4, ensure_ascii=False)
+
+    print("Готово!")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Утилита для оценки позы человека на изображении с использованием модели rtmw-x."
+    )
+    parser.add_argument(
+        "image",
+        type=str,
+        help="Путь к входному изображению (например, person_crop.jpg)"
+    )
+
+    args = parser.parse_args()
+    process_image(args.image)
+
+
+if __name__ == "__main__":
+    main()

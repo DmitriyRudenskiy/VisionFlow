@@ -1,4 +1,3 @@
-# src/application/pipeline/orchestrator.py
 from __future__ import annotations
 
 import logging
@@ -20,11 +19,10 @@ logger = logging.getLogger(__name__)
 class PipelineOrchestrator:
     """
     Оркестратор выполнения пайплайна.
-
-    Управляет жизненным циклом пайплайна, последовательным и параллельным
-    выполнением шагов, сохранением состояния и восстановлением после сбоев.
+    Управляет жизненным циклом, параллелизмом и сохранением состояния.
     """
 
+    # Группы шагов, которые можно выполнять параллельно.
     PARALLEL_GROUPS: List[Set[int]] = [{5, 6, 7, 8}]
 
     def __init__(self, step_registry: StepRegistry, pipeline_repo: PipelineRepository) -> None:
@@ -33,11 +31,9 @@ class PipelineOrchestrator:
         self._save_lock = threading.RLock()
 
     def get_available_steps(self) -> List[int]:
-        """Возвращает отсортированный список номеров доступных шагов."""
         return self._registry.get_step_numbers()
 
     def create_pipeline(self, source_path: Path, output_path: Path) -> PipelineAggregate:
-        """Создаёт новый агрегат пайплайна."""
         return PipelineAggregate(
             name=f"Pipeline-{source_path.name}",
             source_directory=source_path,
@@ -45,12 +41,10 @@ class PipelineOrchestrator:
         )
 
     def _save_pipeline(self, pipeline: PipelineAggregate) -> None:
-        """Потокобезопасное сохранение состояния пайплайна."""
         with self._save_lock:
             self._repo.save(pipeline)
 
     def _build_step_config(self, step_num: int, config: PipelineConfigDTO) -> StepConfigDTO:
-        """Фабричный метод для создания конфигурации шага."""
         return StepConfigDTO(
             sequence_number=step_num,
             params={
@@ -59,186 +53,164 @@ class PipelineOrchestrator:
             },
         )
 
-    def _execute_step_logic(
-            self, step_num: int, config: PipelineConfigDTO
-    ) -> StepResultDTO:
-        """Непосредственное выполнение логики шага (без управления состоянием агрегата)."""
+    def _create_execution_plan(self, requested_steps: List[int]) -> List[List[int]]:
+        """
+        Создает план выполнения: список батчей.
+        Батч с одним шагом выполняется последовательно.
+        Батч с несколькими шагами выполняется параллельно.
+        """
+        plan: List[List[int]] = []
+        processed_steps: Set[int] = set()
+
+        for step_num in requested_steps:
+            if step_num in processed_steps:
+                continue
+
+            # Проверяем, принадлежит ли шаг параллельной группе
+            parallel_group = next((g for g in self.PARALLEL_GROUPS if step_num in g), None)
+
+            if parallel_group:
+                # Собираем все шаги из этой группы, которые были запрошены
+                batch = sorted(list(set(requested_steps) & parallel_group))
+                plan.append(batch)
+                processed_steps.update(batch)
+            else:
+                plan.append([step_num])
+                processed_steps.add(step_num)
+
+        return plan
+
+    def _execute_single_step_logic(self, step_num: int, config: PipelineConfigDTO) -> StepResultDTO:
+        """Непосредственное выполнение логики шага."""
         step_instance = self._registry.get(step_num)
         step_instance.prepare()
         step_config = self._build_step_config(step_num, config)
         return step_instance.execute(step_config)
 
-    def _process_step_result(
-            self,
-            pipeline: PipelineAggregate,
-            step_num: int,
-            result: StepResultDTO,
-            stop_on_error: bool
+    def _handle_step_result(
+            self, pipeline: PipelineAggregate, step_num: int, result: StepResultDTO, stop_on_error: bool
     ) -> None:
-        """Обработка результата шага и обновление состояния пайплайна (потокобезопасно)."""
+        """Обновление состояния агрегата на основе результата."""
         with self._save_lock:
             if result.status == "FAILED":
-                pipeline.fail_step(
-                    step_num,
-                    result.message or "Step returned FAILED status",
-                    critical=stop_on_error,
-                )
+                pipeline.fail_step(step_num, result.message or "Unknown error", critical=stop_on_error)
             else:
                 pipeline.complete_step(step_num)
             self._repo.save(pipeline)
 
-    def _run_single_step(
-            self, pipeline: PipelineAggregate, step_num: int, config: PipelineConfigDTO
-    ) -> StepResultDTO:
-        """Выполняет один шаг синхронно с управлением состояния."""
-        try:
-            pipeline.start_step(step_num)
-            self._save_pipeline(pipeline)
-        except Exception as start_err:
-            logger.error(f"Cannot start step {step_num}: {start_err}")
-            return StepResultDTO.failed(step_num, f"Failed to start step: {start_err}", [str(start_err)])
-
-        logger.info(f"Starting step {step_num}")
-        try:
-            result = self._execute_step_logic(step_num, config)
-            self._process_step_result(pipeline, step_num, result, config.stop_on_error)
-            return result
-        except Exception as e:
-            logger.exception(f"Unhandled exception in step {step_num}")
-            try:
-                pipeline.fail_step(step_num, str(e), critical=config.stop_on_error)
-                self._save_pipeline(pipeline)
-            except Exception as fail_err:
-                logger.error(f"Could not mark step {step_num} as failed: {fail_err}")
-            return StepResultDTO.failed(step_num, str(e), [str(e)])
-
-    def _execute_parallel_group(
-            self,
-            pipeline: PipelineAggregate,
-            group_steps: List[int],
-            config: PipelineConfigDTO,
+    def _run_batch(
+            self, pipeline: PipelineAggregate, batch: List[int], config: PipelineConfigDTO
     ) -> Generator[StepResultDTO, None, None]:
-        """Выполняет группу шагов параллельно."""
+        """Выполняет батч шагов (последовательно или параллельно)."""
 
+        # Фильтруем уже завершенные шаги
         pending_steps: List[int] = []
-        for step_num in group_steps:
-            existing_step = pipeline.find_step(step_num)
-            if existing_step and existing_step.status == StepStatus.COMPLETED:
+        for step_num in batch:
+            step = pipeline.find_step(step_num)
+            if step and step.status == StepStatus.COMPLETED:
                 yield StepResultDTO.skipped(step_num)
-                continue
-
-            try:
-                pipeline.start_step(step_num)
-                self._save_pipeline(pipeline)
+            else:
                 pending_steps.append(step_num)
-            except Exception as start_err:
-                yield StepResultDTO.failed(step_num, f"Failed to start: {start_err}", [str(start_err)])
-                if config.stop_on_error:
-                    return
 
         if not pending_steps:
             return
 
-        executor = ThreadPoolExecutor(max_workers=len(pending_steps), thread_name_prefix="parallel_step")
-        future_to_step = {
-            executor.submit(self._execute_step_logic, num, config): num
-            for num in pending_steps
-        }
+        # Если шаг один - выполняем синхронно
+        if len(pending_steps) == 1:
+            step_num = pending_steps[0]
+            try:
+                pipeline.start_step(step_num)
+                self._save_pipeline(pipeline)
 
-        try:
-            for future in as_completed(future_to_step):
-                step_num = future_to_step[future]
-                try:
-                    result = future.result()
-                    self._process_step_result(pipeline, step_num, result, config.stop_on_error)
-                    yield result
+                result = self._execute_single_step_logic(step_num, config)
+                self._handle_step_result(pipeline, step_num, result, config.stop_on_error)
+                yield result
+            except Exception as e:
+                logger.exception(f"Critical error in step {step_num}")
+                result = StepResultDTO.failed(step_num, str(e), [str(e)])
+                self._handle_step_result(pipeline, step_num, result, config.stop_on_error)
+                yield result
+            return
 
-                    if result.status == "FAILED" and config.stop_on_error:
-                        for f in future_to_step:
-                            if not f.done():
-                                f.cancel()
-                        return
-                except Exception as e:
-                    logger.exception(f"Unhandled exception in parallel step {step_num}")
-                    try:
-                        pipeline.fail_step(step_num, str(e), critical=config.stop_on_error)
-                        self._save_pipeline(pipeline)
-                    except Exception as fail_err:
-                        logger.error(f"Could not mark step {step_num} as failed: {fail_err}")
-                    yield StepResultDTO.failed(step_num, str(e), [str(e)])
-                    if config.stop_on_error:
-                        for f in future_to_step:
-                            if not f.done():
-                                f.cancel()
-                        return
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        # Параллельное выполнение
+        # Сначала помечаем все как RUNNING
+        for step_num in pending_steps:
+            try:
+                pipeline.start_step(step_num)
+            except Exception as e:
+                yield StepResultDTO.failed(step_num, f"Failed to start: {e}", [str(e)])
+                return  # Если не можем стартануть, останавливаем батч
 
-    def execute(
-            self, config: PipelineConfigDTO, pipeline_id: Optional[UUID] = None
-    ) -> Generator[StepResultDTO, None, None]:
-        """Запускает или возобновляет выполнение пайплайна."""
-        if not config.source_path.exists():
-            raise ValueError(f"Source path does not exist: {config.source_path}")
-        if not config.source_path.is_dir():
-            raise ValueError(f"Source path is not a directory: {config.source_path}")
-
-        if pipeline_id:
-            pipeline = self._repo.find_by_id(pipeline_id)
-            if not pipeline:
-                raise ValueError(f"Pipeline with ID {pipeline_id} not found")
-            pipeline.resume()
-            self._save_pipeline(pipeline)
-        else:
-            pipeline = self.create_pipeline(config.source_path, config.output_path)
-            self._save_pipeline(pipeline)
-
-        if config.steps_to_run is not None:
-            step_numbers = sorted(config.steps_to_run)
-        elif pipeline_id:
-            step_numbers = sorted([s.sequence_number for s in pipeline.steps])
-        else:
-            step_numbers = self._registry.get_step_numbers()
-
-        available_step_numbers = self._registry.get_step_numbers()
-        existing_step_numbers = {s.sequence_number for s in pipeline.steps}
-        for step_num in step_numbers:
-            if step_num not in existing_step_numbers:
-                if step_num in available_step_numbers:
-                    step_instance = self._registry.get(step_num)
-                    step_entity = PipelineStep(
-                        sequence_number=step_num,
-                        name=step_instance.__class__.__name__,
-                    )
-                    pipeline.add_step(step_entity)
-                else:
-                    logger.warning(f"Step {step_num} requested but not found in registry.")
         self._save_pipeline(pipeline)
 
-        completed_parallel: Set[int] = set()
-        for step_num in step_numbers:
-            if step_num in completed_parallel:
-                continue
+        executor = ThreadPoolExecutor(max_workers=len(pending_steps), thread_name_prefix="parallel_step")
+        try:
+            future_map = {
+                executor.submit(self._execute_single_step_logic, num, config): num
+                for num in pending_steps
+            }
 
+            for future in as_completed(future_map):
+                step_num = future_map[future]
+                try:
+                    result = future.result()
+                    self._handle_step_result(pipeline, step_num, result, config.stop_on_error)
+                    yield result
+                except Exception as e:
+                    logger.exception(f"Unhandled exception in parallel step {step_num}")
+                    result = StepResultDTO.failed(step_num, str(e), [str(e)])
+                    self._handle_step_result(pipeline, step_num, result, config.stop_on_error)
+                    yield result
+                    if config.stop_on_error:
+                        # Не ждем оставшиеся задачи — завершаем executor немедленно
+                        executor.shutdown(wait=False)
+                        return
+        finally:
+            # Гарантируем закрытие пула, если он ещё не завершён
+            executor.shutdown(wait=False)
+
+    def execute(
+            self, config: PipelineConfigDTO, pipeline_id: Optional[str | UUID] = None
+    ) -> Generator[StepResultDTO, None, None]:
+        """Запускает или возобновляет выполнение пайплайна."""
+
+        # 1. Инициализация или загрузка
+        if not config.source_path.exists():
+            raise ValueError(f"Source path does not exist: {config.source_path}")
+
+        if pipeline_id:
+            _pid = pipeline_id if isinstance(pipeline_id, UUID) else UUID(pipeline_id)
+            pipeline = self._repo.find_by_id(_pid)
+            if not pipeline:
+                raise ValueError(f"Pipeline {pipeline_id} not found")
+            pipeline.resume()
+        else:
+            pipeline = self.create_pipeline(config.source_path, config.output_path)
+
+        self._save_pipeline(pipeline)
+
+        # 2. Определение списка шагов
+        if config.steps_to_run is not None:
+            target_steps = sorted(config.steps_to_run)
+        elif pipeline_id:
+            target_steps = sorted([s.sequence_number for s in pipeline.steps])
+        else:
+            target_steps = self._registry.get_step_numbers()
+
+        # 3. Регистрация шагов в агрегате (если их нет)
+        available_steps = self._registry.get_step_numbers()
+        for step_num in target_steps:
+            if not pipeline.find_step(step_num) and step_num in available_steps:
+                step_name = self._registry.get(step_num).__class__.__name__
+                pipeline.add_step(PipelineStep(sequence_number=step_num, name=step_name))
+
+        self._save_pipeline(pipeline)
+
+        # 4. Планирование и выполнение
+        execution_plan = self._create_execution_plan(target_steps)
+
+        for batch in execution_plan:
             if pipeline.status == PipelineStatus.FAILED and config.stop_on_error:
-                return
+                break
 
-            group = next((g for g in self.PARALLEL_GROUPS if step_num in g), None)
-
-            if group:
-                group_steps = [s for s in step_numbers if s in group and s not in completed_parallel]
-                if not group_steps:
-                    continue
-
-                yield from self._execute_parallel_group(pipeline, group_steps, config)
-                completed_parallel.update(group_steps)
-            else:
-                existing_step = pipeline.find_step(step_num)
-                if existing_step and existing_step.status == StepStatus.COMPLETED:
-                    yield StepResultDTO.skipped(step_num)
-                    continue
-
-                result = self._run_single_step(pipeline, step_num, config)
-                yield result
-                if result.status == "FAILED" and config.stop_on_error:
-                    return
+            yield from self._run_batch(pipeline, batch, config)

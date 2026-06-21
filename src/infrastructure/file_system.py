@@ -16,6 +16,7 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset(
 
 class FileSystemStorage(StoragePort):
     def scan_directory(self, path: Path, recursive: bool = True) -> List[Path]:
+        """Возвращает список файлов изображений."""
         if not path.is_dir():
             return []
         pattern = "**/*" if recursive else "*"
@@ -23,6 +24,13 @@ class FileSystemStorage(StoragePort):
             p for p in path.glob(pattern)
             if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
         ])
+
+    def get_all_files(self, path: Path, recursive: bool = True) -> List[Path]:
+        """Возвращает список всех файлов в директории без фильтрации по расширению."""
+        if not path.is_dir():
+            return []
+        pattern = "**/*" if recursive else "*"
+        return sorted([p for p in path.glob(pattern) if p.is_file()])
 
     def move_file(self, source: Path, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
