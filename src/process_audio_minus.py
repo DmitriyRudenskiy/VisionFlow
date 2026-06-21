@@ -18,7 +18,14 @@ def extract_instrumental_ensemble(input_path, output_path):
     instrumentals_list = []
 
     # Определение устройства (GPU если доступно, иначе CPU)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # Добавлена поддержка Apple Silicon (M1/M2/M3) через MPS
+    if torch.cuda.is_available():
+        device = 'cuda'
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
+
     print(f"[*] Используемое устройство: {device}")
 
     for name in model_names:
@@ -62,31 +69,30 @@ def extract_instrumental_ensemble(input_path, output_path):
 
 def calculate_bpm_librosa(input_path):
     """
-    Определение BPM с помощью библиотеки librosa.
-    Использует алгоритм отслеживания onset (начал нот) и темповую кривую.
+    Определение BPM с помощью librosa (использование стабильного метода beat_track).
     """
     print(f"[*] Расчет BPM с помощью librosa...")
-    # Загружаем аудио с частотой дискретизации 22050 (стандарт для librosa, ускоряет обработку)
     y, sr = librosa.load(input_path, sr=22050)
 
-    # Вычисление огибающей onset (силы новых событий/нот)
     onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
 
-    # Определение темпа (возвращает массив возможных темпов, берем первый)
-    tempo = librosa.beat.tempo(onset_envelope=onset_env, sr=sr)
+    # В разных версиях librosa tempo может возвращаться как массив с одним элементом или как число
+    if isinstance(tempo, np.ndarray):
+        bpm = int(round(tempo[0]))
+    else:
+        bpm = int(round(tempo))
 
-    # Округляем до целого числа
-    bpm = int(round(tempo[0]))
     return bpm
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Скрипт для извлечения минусовки (Ensemble) и определения BPM (librosa)."
+        description="Скрипт для извлечения минусовки (Ensemble) и определения BPM."
     )
     parser.add_argument("input", help="Путь к входному аудиофайлу (mp3, wav, flac и т.д.)")
-    parser.add_argument("-o", "--output", default="instrumental_output.wav",
-                        help="Путь для сохранения минусовки (по умолчанию: instrumental_output.wav)")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Путь для сохранения минусовки (по умолчанию: <имя_файла>_minus.wav)")
 
     args = parser.parse_args()
 
@@ -94,15 +100,22 @@ def main():
         print(f"Ошибка: Файл '{args.input}' не найден.")
         return
 
-    # 1. Извлечение минусовки
-    extract_instrumental_ensemble(args.input, args.output)
+    # Автоматическая генерация имени выходного файла, если не указан флаг -o
+    if args.output is None:
+        base_name = os.path.splitext(os.path.basename(args.input))[0]
+        output_path = f"{base_name}_minus.wav"
+    else:
+        output_path = args.output
 
-    # 2. Определение BPM (по исходному файлу, так как там ритм-секция выражена ярче)
+    # 1. Извлечение минусовки
+    extract_instrumental_ensemble(args.input, output_path)
+
+    # 2. Определение BPM (по исходному файлу)
     bpm = calculate_bpm_librosa(args.input)
 
     print("\n" + "=" * 40)
     print("РЕЗУЛЬТАТЫ:")
-    print(f"Минусовка:         {args.output}")
+    print(f"Минусовка:         {output_path}")
     print(f"Определенный BPM:  {bpm}")
     print("=" * 40)
 
